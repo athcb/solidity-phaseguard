@@ -1,4 +1,8 @@
 
+## PhaseGuard
+
+PhaseGuard is a lifecycle layer that routes every call through a shared phase machine, so initialization, mutation, externalization, and finalization follow one enforced order. Policies on each phase encode today’s best practices (init process, CEI, pause/upgrade invariants, and other phase-specific policies) in one guard, replacing scattered modifiers and making lifecycle mistakes structurally impossible.
+
 ## Phase Descriptions
 
 | Phase          | Summary                                                                                  |
@@ -11,6 +15,8 @@
 | Paused         | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
 
 ## Phase Transition Matrix
+
+Allowed transitions:
 
 | From / To        | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED |
 |------------------|---------------|-------|----------|---------------|-----------|--------|
@@ -59,7 +65,7 @@ Below is a list of common exploits PhaseGuard aims to tackle.
 
 Classic "DAO hack" style reentrancy where an attacker re-enters a function to drain funds before the balance is updated.
 
-| Attribute | Description |
+|  | Description |
 |-----------|-------------|
 | **Victim** | The Contract itself (accounting mismatch) |
 | **Trigger** | Callback on value transfer (`msg.sender.call`) |
@@ -85,7 +91,7 @@ function withdraw(uint256 amount) external {
 
 The contract is not drained directly, but its view functions report incorrect data during a state update, causing loss in third-party systems.
 
-| Attribute | Description |
+|  | Description |
 |-----------|-------------|
 | **Victim** | Integrators (Lending Markets relying on this pool as an Oracle) |
 | **Trigger** | Callback on share token (Deposit) OR asset token (Withdraw) |
@@ -115,7 +121,7 @@ function pricePerShare() external view returns (uint256) {
 }
 ```
 
-**Example B: Deflated price during Removal (Curve/Balancer style)**
+**Example B: Deflated price during Removal (Curve/Balancer type hack)**
 
 *Mechanism: Assets decrease before Supply is burned.*
 
@@ -138,15 +144,15 @@ function removeLiquidity(uint256 lpAmount) external {
 }
 ```
 
-**Unified Attack Path (Price Devaluation)**
+**Attack Path (Price Devaluation)**
 
-1.  **Setup**: Victim has a healthy loan on a Lending Market, using Pool LP tokens as collateral.
-2.  **Trigger**: Attacker calls `deposit` or `removeLiquidity`.
-3.  **State Mismatch**: During the callback, the Pool's `pricePerShare` reports a value lower than reality.
-4.  **Exploit**: Attacker calls `liquidate(victim)` on the Lending Market.
-5.  **Validation**: Lending Market reads the low price, marks Victim as insolvent.
-6.  **Profit**: Attacker liquidates collateral at a discount.
-7.  **Settlement**: Function completes, price returns to normal.
+1. Victim has a healthy loan on a Lending Market, using Pool LP tokens as collateral.
+2. Attacker calls `deposit` or `removeLiquidity`.
+3. During the callback, the Pool's `pricePerShare` reports a value lower than reality.
+4. Attacker calls `liquidate(victim)` on the Lending Market.
+5. Lending Market reads the low price, marks Victim as insolvent.
+6. Attacker liquidates collateral at a discount.
+7. Function completes, price returns to normal.
 
 ---
 
@@ -158,28 +164,129 @@ function removeLiquidity(uint256 lpAmount) external {
 | **Read-Only Reentrancy** <br> *(Oracle Manipulation)* | **Manual Checks**: <br>1. Opt-in `check_reentrancy()` (relies on integrators). <br>2. Internal check in every view (Maintenance burden). | **Automatic (MUTATING Phase)** <br> Blocks `ALLOW_VIEWS` (read-only entry). <br> *Views revert automatically during exploits.* |
 
 
-## 3. Re-initialization
+## 3. Re-initialization via storage collision (proxy-based)
 
-| Attribute | Description |
+Admin upgrades a UUPS manually but the new implementation has added a state variable before the already existing variables. As a result, the _initialized flag within the proxy's storage is set to zero. 
+
+|  | Description |
 |-----------|-------------|
-| **Victim** |  |
-| **Trigger** |  |
-| **Result** |  |
-| **Attack** |  |
+| **Victim** | Contract |
+| **Trigger** | Storage colission |
+| **Result** | `_initialized` reset to 0 |
+| **Attack** | attacker becomes admin after re-initializing |
+
+**Example**
+```solidity
+// V1 implementation
+contract VaultV1 is Initializable, UUPSUpgradeable {
+    // OZ _initialized, _initializing in slot 0 
+    address public admin;    // slot 1
+    uint256 public feeBps;   // slot 2
+
+    function initialize(address _admin, uint256 _fee) public initializer {
+        admin = _admin;
+        feeBps = _fee;
+    }
+}
+
+// V2 implementation (bug: inserts var before inherited storage)
+contract VaultV2 is Initializable, UUPSUpgradeable {
+    uint256 public newConfig;  // slot 0 (collides with initializer state)
+    address public admin;      // slot 1
+    uint256 public feeBps;     // slot 2
+
+    function initializeV2(uint256 cfg) public reinitializer(2) {
+        newConfig = cfg;
+    }
+}
+```
+
+Attack Path: 
+1. Admin upgrades proxy from V1 to V2 manually (no OZ plugin check).
+2. newConfig is stored at slot 0, overwriting Initializable’s `_initialized` bit.
+3. `_initialized` reverts to 0. Proxy now thinks it was never initialized.
+4. Attacker calls initialize(attacker, …) on the proxy.
+5. Attacker becomes admin, can drain or upgrade again.
+
+| Security Challenge | Current Standard Solutions | PhaseGuard Solution |
+| :--- | :--- | :--- |
+| **Re-initialization via storage colission** | manual OZ upgrade plugin check | **Automatic (READY Phase)** <br> Blocks transition from READY to UNINITIALIZED even after a storage collision|
 
 
+## 4. Re-initialization via upgrade flow (proxy-based)
+
+## 5. Non-proxy re-initialization 
+
+Even contracts deployed without proxies can be exploited when their initializer functions remain callable or state variables have not been set.
+
+|  | Description |
+|-----------|-------------|
+| **Victim** | Contract |
+| **Trigger** | Public initializer callable / Uninitialized state variables |
+| **Result** | Attacker becomes owner / State variables default to 0 |
+| **Attack** | Attcker takes ownership / Funds stolen using unset state variables |
+
+**Example A: Parity Wallet Library (2017) type hack**
+
+*Mechanism: shared library redeployed after a fix, but nobody re-initialized it*
+
+```solidity
+contract WalletLibrary {
+    address public owner;
+    bool public initialized;
+
+    function initWallet(address _owner) public {
+        require(!initialized, "already initialized");
+        owner = _owner;
+        initialized = true;
+    }
+
+    function kill(address payable recipient) external {
+        require(msg.sender == owner, "not owner");
+        selfdestruct(recipient);
+    }
+}
+```
+
+Attack Path: 
+1. Library / contract is re-deployed after a fix but admins forget to initialize it (`initWallet`).
+2. Attacker calls `initWallet` and becomes owner.
+3. Attacker then calls `kill()` triggering a selfdestruct and removing the code for every wallet pointing to the library. 
+4. Funds are frozen forever. 
+
+**Example B: Nomad Bridge (2022) type hack**
+
+*Mechanism: contract redeployed, state variables left uninitialized*
+```solidity
+contract Replica {
+    bytes32 public committedRoot;
+    bool public initialized;
+
+    function initialize(bytes32 _root) external {
+        require(!initialized, "already initialized");
+        committedRoot = _root;
+        initialized = true;
+    }
+
+    function process(bytes calldata message, bytes32 root) external {
+        // expects root to match the proven tree root
+        require(root == committedRoot, "invalid root");
+        _execute(message); // releases bridged funds
+    }
+}
+```
+Attack Path: 
+1. Protocol deploys new contract but never calls `initialize()`.
+2. `committedRoot` defaults to 0x0.
+3. Attacker calls `process` with a 0x0 root and steals funds. 
+
+
+| Security Challenge | Current Standard Solutions | PhaseGuard Solution |
+| :--- | :--- | :--- |
+| **Parity-style: Public initializer callable after redeploy** | Manual runbooks that remind operators to call `init` after deployment; relies entirely on humans | PhaseGuard keeps the contract in `UNINITIALIZED` until the privileged bootstrap script runs the initializer in the same transaction (or authorized sequence): every other entrypoint—including `init` reverts |
+| **Nomad-style: Critical state defaults because initializer never runs** | Audits and post-deploy checklists to set state (e.g., Merkle roots) | PhaseGuard blocks every public function while in `UNINITIALIZED`, so operational calls like `process()` cannot execute until the initializer commits non-zero state. If the bootstrap deadline is missed, deployment reverts |
 
 ## 4. Double-finalization
 
 
-
-
-## Guard To Exploit Matrix
-
-| Exploit Type | Root Cause | Victim | PhaseGuard Defense |
-|--------------|------------|--------|-------------------|
-| **State-Modifying Reentrancy** | CEI Violation (Writes after Call) | The Contract Itself | **Phase.Mutating**: Implementation enters `MUTATING` phase which disables `ALLOW_USER` / `ALLOW_EXTERNAL`. Re-entering `withdraw()` fails because the contract is not in `READY` phase. |
-| **Read-Only Reentrancy** | CEI Violation (Writes after Call) | Third-party Integrators (Lending Markets) | **View Locks**: During `MUTATING` phase, `ALLOW_VIEWS` is disabled. Any call to `pricePerShare()` or `getVirtualPrice()` reverts, preventing the third party from reading stale data. |
-| **Cross-Function Reentrancy** | Shared State inconsistencies | The Contract Itself | **Phase.Mutating**: Global lock prevents entering *any* public function that modifies state. |
-| **Delegatecall Injection** | Unsafe delegatecall | The Contract Itself | **Bit Flags**: `ALLOW_DELEGATECALL` is explicit. Default policy is `0` (Disabled). |
 
