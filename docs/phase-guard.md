@@ -212,10 +212,7 @@ Attack Path:
 | :--- | :--- | :--- |
 | **Re-initialization via storage colission** | manual OZ upgrade plugin check | **Automatic (READY Phase)** <br> Blocks transition from READY to UNINITIALIZED even after a storage collision|
 
-
-## 4. Re-initialization via upgrade flow (proxy-based)
-
-## 5. Non-proxy re-initialization 
+## 4. Non-proxy re-initialization 
 
 Even contracts deployed without proxies can be exploited when their initializer functions remain callable or state variables have not been set.
 
@@ -286,7 +283,80 @@ Attack Path:
 | **Parity-style: Public initializer callable after redeploy** | Manual runbooks that remind operators to call `init` after deployment; relies entirely on humans | PhaseGuard keeps the contract in `UNINITIALIZED` until the privileged bootstrap script runs the initializer in the same transaction (or authorized sequence): every other entrypoint—including `init` reverts |
 | **Nomad-style: Critical state defaults because initializer never runs** | Audits and post-deploy checklists to set state (e.g., Merkle roots) | PhaseGuard blocks every public function while in `UNINITIALIZED`, so operational calls like `process()` cannot execute until the initializer commits non-zero state. If the bootstrap deadline is missed, deployment reverts |
 
-## 4. Double-finalization
+## 5. Pause bypass / incomplete pause coverage
+
+Sensitive functions missing `whenNotPaused` can lead to attackers bypassing the pause mechanism and drain funds. 
+
+|  | Description |
+|-----------|-------------|
+| **Victim** | Contract |
+| **Trigger** | missing `whenNotPaused` modifier |
+| **Result** | unguarded function |
+| **Attack** | Attacker drains funds through permitted entrypoint |
+
+**Example: Compound Proposal 62 incident (2021)**
+
+*Mechanism: Governance executed Proposal 62 but accidentally wrote huge positive `accruedComp` balances to many users. The pause guardian halted `mint`/`borrow`, yet `claimComp()` lacked the pause modifier, so anyone with a bloated balance could keep calling it to withdraw inflated COMP rewards until Proposal 63 (emergency fix) could pass its timelock.* 
+
+```solidity
+contract ComptrollerLike {
+    address public pauseGuardian;
+    bool public transfersPaused;
+    mapping(address => uint256) public accruedComp;
+
+    modifier whenNotPaused() {
+        require(!transfersPaused || msg.sender == pauseGuardian, "paused");
+        _;
+    }
+
+    function setPauseGuardian(address guardian) external {
+        // governance only, omitted for brevity
+        pauseGuardian = guardian;
+    }
+
+    function sweepPause(bool pause) external {
+        require(msg.sender == pauseGuardian, "not guardian");
+        transfersPaused = pause;
+    }
+
+    // Core actions respect the pause flag
+    function mint(address market, uint256 amount) external whenNotPaused {
+        // ... mint logic ...
+    }
+
+    function borrow(address market, uint256 amount) external whenNotPaused {
+        // ... borrow logic ...
+    }
+
+    // Vulnerable: Proposal 62 accidentally boosted accruedComp,
+    // but claimComp() never checked pause state.
+    function claimComp(address user) external { // whenNotPaused missing
+        uint256 claimable = accruedComp[user];
+        require(claimable > 0, "nothing to claim");
+
+        accruedComp[user] = 0;
+        _transferComp(user, claimable); // inflated rewards paid out even while paused
+    }
+
+    function _transferComp(address to, uint256 amount) internal {
+        // send COMP
+    }
+}
+```
+
+Attack path: 
+1. Protocol forgets to add `whenNotPaused` to a critical function (`claimComp`).
+2. Upgrade bloats state variable `accruedComp`. 
+3. Pause Guardian calls `sweepPause` to block user-entry points, but `claimComp` is unguarded.
+4. Governance timelock prevents an immediate fix and as a result attackers repeatedly call `claimComp` to drain funds.
+
+
+| Security Challenge | Current Standard Solutions | PhaseGuard Solution |
+| :--- | :--- | :--- |
+| **Proposal 62-style: Pause guardian misses a code path** | Rely on developers to remember every function that needs `whenNotPaused`| PhaseGuard puts the entire contract into `PAUSED` phase with a single state transition: policy bits can be tuned to auto-disable `ALLOW_USER`, `ALLOW_EXTERNAL`, and `ALLOW_VALUE` while enabling `ALLOW_ADMIN` enabled if needed. No per-function modifiers |
+
+
+
 
 
 
