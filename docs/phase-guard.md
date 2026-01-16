@@ -13,19 +13,28 @@ PhaseGuard is a lifecycle layer that routes every call through a shared phase ma
 | Externalizing  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
 | Finalized      | Terminal locked state: no transitions, writes, or calls.                                 |
 | Paused         | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
+| Maintenance    | Admin-only maintenance/upgrade window: user entrypoints stay blocked while delegatecall/external automation runs under stricter policy bits. |
 
 ## Phase Transition Matrix
 
 Allowed transitions:
 
-| From / To        | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED |
-|------------------|---------------|-------|----------|---------------|-----------|--------|
-| UNINITIALIZED    |      -        |  YES  |   NO     |     NO        |   NO      |  NO    |
-| READY            |     NO        |   -   |   YES    |     YES       |   YES     |  YES   |
-| MUTATING         |     NO        |  YES  |    -     |     NO        |   NO      |  NO    |
-| EXTERNALIZING    |     NO        |  YES  |   NO     |     -         |   NO      |  NO    |
-| FINALIZED        |     NO        |  NO   |   NO     |     NO        |   -       |  NO    |
-| PAUSED           |     NO        |  YES  |   NO     |     NO        |   YES     |  -     |
+| From / To        | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
+|------------------|---------------|-------|----------|---------------|-----------|--------|-------------|
+| UNINITIALIZED    |      -        |  YES  |   NO     |     NO        |   NO      |  NO    |     NO      |
+| READY            |     NO        |   -   |   YES    |     YES       |   YES     |  YES   |     YES     |
+| MUTATING         |     NO        |  YES  |    -     |     NO        |   NO      |  NO    |     YES     |
+| EXTERNALIZING    |     NO        |  YES  |   NO     |     -         |   NO      |  NO    |     YES     |
+| FINALIZED        |     NO        |  NO   |   NO     |     NO        |   -       |  NO    |     NO      |
+| PAUSED           |     NO        |  YES  |   NO     |     NO        |   YES     |  -     |     YES     |
+| MAINTENANCE      |     NO        |  YES  |   YES    |     YES       |   NO      |  NO    |      -      |
+
+**Stable phases:**
+- UNINITIALIZED, READY, FINALIZED, PAUSED, MAINTENANCE: contract **must** return to either of those after functions finish executing.
+
+**Unstable phases:**
+- EXTERNALIZING, MUTATING: contract is allowed to be in unstable phases mid-function but **must** return to a stable phase when the call ends.
+- contract **must** return to the most recent stable phase captured on entry (eg., READY -> MUTATING -> READY).
 
 
 ## Bit Flag descriptions
@@ -46,16 +55,20 @@ Allowed transitions:
 
 The values below are just defaults - they can be adjusted on a usecase basis.
 
-| Bit Flag / Phase | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED |
-|------------------|---------------|-------|----------|---------------|-----------|--------|
-| ALLOW_USER       |               |       |          |               |           |        |
-| ALLOW_ADMIN      |               |       |          |               |           |        |
-| ALLOW_EXTERNAL   |               |       |          |               |           |        |
-| ALLOW_VALUE      |               |       |          |               |           |        |
-| ALLOW_WRITES     |               |       |          |               |           |        |
-| ALLOW_VIEWS      |               |       |          |               |           |        |
-| ALLOW_CALLBACKS  |               |       |          |               |           |        |
-| ALLOW_DELEGATECALL|              |       |          |               |           |        |
+| Bit Flag / Phase | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
+|------------------|---------------|-------|----------|---------------|-----------|--------|-------------|
+| ALLOW_USER       |      NO       |  YES  |   NO     |    NO         |   NO      |  NO    |     NO      |
+| ALLOW_ADMIN      |      NO       |  YES  |   NO     |    NO         |   NO      |  YES   |     YES     |
+| ALLOW_EXTERNAL   |      NO       |  NO   |   NO     |    YES        |   NO      |  NO    |     YES     |
+| ALLOW_VALUE      |      NO       |  NO   |   NO     |    YES        |   NO      |  NO    |     YES     |
+| ALLOW_WRITES     |      NO       |  NO   |   YES    |    NO         |   NO      |  NO    |     YES     |
+| ALLOW_VIEWS      |      NO       |  YES  |   NO     |    NO         |   YES     |  YES   |     YES     |
+| ALLOW_CALLBACKS  |      NO       |       |   NO     |    ?          |   NO      |  NO    |     YES     |
+| ALLOW_DELEGATECALL|    NO        |  NO   |   NO     |    NO         |   NO      |  NO    |     YES     |
+
+> Maintenance is the only phase that simultaneously enables `ALLOW_WRITES`, `ALLOW_EXTERNAL`, and `ALLOW_DELEGATECALL` while keeping `ALLOW_USER` off. Transitions are limited to operator-controlled states (READY, PAUSED, or MUTATING) so a runbook can finish a write cycle, hop into Maintenance, run privileged automation, then return to READY or drop into EXTERNALIZING for outbound calls without exposing that power to end users.
+
+> The initializer runs with an authorized bootstrap call : deploy -> UNINITIALIZED (all bits off) -> init via bootstrap -> tranistions contract into READY.
 
 ## Exploits
 
@@ -353,10 +366,178 @@ Attack path:
 
 | Security Challenge | Current Standard Solutions | PhaseGuard Solution |
 | :--- | :--- | :--- |
-| **Proposal 62-style: Pause guardian misses a code path** | Rely on developers to remember every function that needs `whenNotPaused`| PhaseGuard puts the entire contract into `PAUSED` phase with a single state transition: policy bits can be tuned to auto-disable `ALLOW_USER`, `ALLOW_EXTERNAL`, and `ALLOW_VALUE` while enabling `ALLOW_ADMIN` enabled if needed. No per-function modifiers |
+| **Pause guardian misses a code path** | Rely on developers to remember every function that needs `whenNotPaused`| PhaseGuard puts the entire contract into `PAUSED` phase with a single state transition: policy bits can be tuned to auto-disable `ALLOW_USER`, `ALLOW_EXTERNAL`, and `ALLOW_VALUE` while enabling `ALLOW_ADMIN` if needed. No per-function modifiers |
+
+## 6 Delegatecall injection paths
+
+**Example A: SushiSwap Dutch Auction (2021) type hack**
+
+*Mechanism: delegatecall overrides storage in the contract's context*
+```solidity
+// Simplified MISO-style launcher
+contract AuctionLauncher {
+    address public treasury;
+    mapping(bytes32 => bool) public templates; // supposed to whitelist auction logic
+
+    function registerTemplate(bytes32 templateId, address impl) external /* governance */ {
+        templates[templateId] = true;
+        templateImpl[templateId] = impl;
+    }
+
+    function launch(bytes32 templateId, bytes calldata initData) external payable {
+        require(templates[templateId], "template not approved");
+        treasury = msg.sender; // project expects its own wallet set here
+
+        // Vulnerability: user controls initData and can point templateId to a malicious impl
+        // The delegatecall executes inside AuctionLauncher’s storage context.
+        (bool ok, ) = templateImpl[templateId].delegatecall(
+            abi.encodeWithSignature("initAuction(bytes)", initData)
+        );
+        require(ok, "init failed");
+    }
+
+    function withdrawProceeds() external {
+        require(msg.sender == treasury, "not treasury");
+        (bool ok, ) = treasury.call{value: address(this).balance}("");
+        require(ok, "send failed");
+    }
+}
+
+// Attacker-supplied "template" that overwrites treasury.
+contract EvilTemplate {
+    address public treasury; // storage slot aligns with AuctionLauncher.treasury
+
+    function initAuction(bytes calldata) external {
+        treasury = msg.sender; // when delegatecalled, overwrites launcher.treasury
+    }
+}
+```
+Attack path: 
+1. Attacker socially engineered the MISO team to register their “whitelisted” template address.
+2. During launch(), the factory executed delegatecall into the template’s initAuction.
+3. The malicious template rewrote treasury to the attacker’s address inside the factory contract.
+4. After the auction raised funds, the attacker called withdrawProceeds() and drained the entire sale (approx $3M USDC/ETH).
+
+**Example B: Furucombo cached handler (2021) type hack**
+
+*Mechanism: cached malicious handler hijacks user approvals to siphon funds*
+```solidity
+contract ComboProxy {
+    struct Cube { address handler; bytes data; }
+
+    mapping(bytes32 => Cube[]) public cachedCombos;
+
+    function cacheCombo(bytes32 id, Cube[] calldata cubes) external /* admin */ {
+        cachedCombos[id] = cubes; // stored recipe executes later
+    }
+
+    function executeCached(bytes32 id) external payable {
+        Cube[] storage cubes = cachedCombos[id];
+        for (uint256 i; i < cubes.length; i++) {
+            // Vulnerability: handler target can be swapped to attacker-controlled logic.
+            (bool ok, ) = cubes[i].handler.delegatecall(cubes[i].data);
+            require(ok, "cube failed");
+        }
+    }
+}
+
+// Attacker registers a handler that reuses user approvals inside the proxy’s storage.
+contract EvilHandler {
+    IERC20 public token;
+
+    function init(address _token) external {
+        token = IERC20(_token);
+    }
+
+    function rug(address victim) external {
+        // executes as ComboProxy (which already has victim approvals)
+        token.transferFrom(victim, msg.sender, token.balanceOf(victim));
+    }
+}
+```
+
+Attack path:
+1. Attacker deploys `EvilHandler` disguised as a legitimate protocol adapter. The malicious code is hidden within a helper import.
+2. Victims previously granted ComboProxy unlimited ERC20 approvals for legitimate strategies.
+3. When any victim executes the cached combo, the proxy delegatecalls `EvilHandler.rug`, which runs in the proxy’s context and uses the stored approvals/state.
+4. `transferFrom` pulls the victim’s entire balance to the attacker before the combo reverts or completes.
+5. Because the malicious handler stayed cached, every subsequent user who clicked “execute cached combo” was drained without additional interaction.
+
+| Security Challenge | Current Standard Solutions | PhaseGuard Solution |
+| :--- | :--- | :--- |
+| **Delegatecall injection path** | Governance allow-lists, handler reviews, and emergency kill switches—all manual and reactive, so a malicious contract continues running attacker code until admins intervene. | user-facing phases (READY, EXTERNALIZING) never permit delegatecall: any attempt from a public entrypoint reverts because `ALLOW_DELEGATECALL` stays at 0. Teams need to enter `MAINTENANCE` (where `ALLOW_DELEGATECALL` is enabled while `ALLOW_USER` is disabled) execute a bounded runbook, then transition back to READY. |
 
 
+## 7 Callback exploit within a delegatecalled proxy context 
 
+**Example A: Lendf.Me imBTC (2020) type hack**
 
+*Mechanism: ERC777 hook reentrancy that directly mutates vault balances as implementation runs in the proxy’s storage context*
 
+```solidity
+contract LendfMeiBTC is IERC777Recipient {
+    IERC777 public immutable imBTC;
+    address public immutable underlying;
+    mapping(address => uint256) public accountTokens;
+    uint256 public totalSupply;
+
+    function mint(uint256 mintAmount) external returns (uint256) {
+        (uint256 err, ) = mintInternal(msg.sender, mintAmount);
+        require(err == 0, "mint failed");
+        return err;
+    }
+
+    function mintInternal(address minter, uint256 mintAmount) internal returns (uint256, uint256) {
+        accrueInterest();
+
+        uint256 exchangeRate = exchangeRateStoredInternal();
+        uint256 actualMintAmount = doTransferIn(minter, mintAmount);
+        // ^ imBTC.transferFrom() triggers tokensReceived before balances are updated
+
+        uint256 mintTokens = (actualMintAmount * 1e18) / exchangeRate;
+        totalSupply += mintTokens;
+        accountTokens[minter] += mintTokens;
+        return (0, mintTokens);
+    }
+
+    function doTransferIn(address from, uint256 amount) internal returns (uint256) {
+        IERC20 token = IERC20(underlying);
+        uint256 balanceBefore = token.balanceOf(address(this));
+        require(token.transferFrom(from, address(this), amount), "transfer failed");
+        uint256 balanceAfter = token.balanceOf(address(this));
+        return balanceAfter - balanceBefore;
+    }
+
+    // Lendf.Me registered itself in ERC1820, so imBTC invokes this hook mid-mint.
+    function tokensReceived(
+        address /*operator*/,
+        address from,
+        address /*to*/,
+        uint256 /*amount*/,
+        bytes calldata,
+        bytes calldata
+    ) external override {
+        // ERC777 calls this hook after tokens move but before mintInternal updates supply.
+        // Whatever share balance `from` had BEFORE this deposit is redeemed at the temporarily inflated price.
+        redeemFresh(from, accountTokens[from], 0);
+    }
+
+    function redeemFresh(address redeemer, uint256 redeemTokens, uint256 redeemAmountIn) internal {
+        uint256 exchangeRate = exchangeRateStoredInternal();
+        uint256 redeemAmount = redeemAmountIn == 0
+            ? (redeemTokens * exchangeRate) / 1e18
+            : redeemAmountIn;
+
+        totalSupply -= redeemTokens;
+        accountTokens[redeemer] -= redeemTokens;
+        doTransferOut(redeemer, redeemAmount);
+    }
+}
+```
+
+Attack path:
+1. The attacker preloads a large amount of iBTC shares (borrowed elsewhere) and keeps them in the proxy, which assumes depositors arrive with zero balance.
+2. They submit a tiny new deposit; `imBTC.transferFrom` transfers assets before `totalSupply` moves, so the exchange rate temporarily inflates by `deltaAssets / oldSupply`.
+3. The ERC777 `tokensReceived` hook reenters `redeemFresh` and cashes out the *entire* preloaded share balance at that inflated price, returning far more imBTC than the attacker just supplied.
+4. Once the hook exits, `mintInternal` finishes, re-crediting fresh shares at the old rate. The attacker reloads the stash and repeats, draining almost the whole ~$25M pool and making a profit. 
 
