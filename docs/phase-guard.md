@@ -10,31 +10,35 @@ PhaseGuard is a lifecycle layer that routes every call through a shared phase ma
 | Uninitialized  | Deployed but not initialized (initializer/init step pending).                            |
 | Ready          | Initialized, stable: user/admin entrypoints and reads allowed.                           |
 | Mutating       | Write phase: storage updates allowed, outbound calls/value blocked.                      |
+| Callbacking    | Transient hook window: inbound callbacks allowed, writes/external calls disabled.        |
 | Externalizing  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
 | Finalized      | Terminal locked state: no transitions, writes, or calls.                                 |
 | Paused         | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
 | Maintenance    | Admin-only maintenance/upgrade window: user entrypoints stay blocked while delegatecall/external automation runs under stricter policy bits. |
 
+- InCallback: inbound callbacks allowed, storage writes blocked
+
 ## Phase Transition Matrix
 
 Allowed transitions:
 
-| From / To        | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
-|------------------|---------------|-------|----------|---------------|-----------|--------|-------------|
-| UNINITIALIZED    |      -        |  YES  |   NO     |     NO        |   NO      |  NO    |     NO      |
-| READY            |     NO        |   -   |   YES    |     YES       |   YES     |  YES   |     YES     |
-| MUTATING         |     NO        |  YES  |    -     |     NO        |   NO      |  NO    |     YES     |
-| EXTERNALIZING    |     NO        |  YES  |   NO     |     -         |   NO      |  NO    |     YES     |
-| FINALIZED        |     NO        |  NO   |   NO     |     NO        |   -       |  NO    |     NO      |
-| PAUSED           |     NO        |  YES  |   NO     |     NO        |   YES     |  -     |     YES     |
-| MAINTENANCE      |     NO        |  YES  |   YES    |     YES       |   NO      |  NO    |      -      |
+| From / To        | UNINITIALIZED | READY | MUTATING | CALLBACKING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
+|------------------|---------------|-------|----------|-------------|---------------|-----------|--------|-------------|
+| UNINITIALIZED    |      -        |  YES  |   NO     |     NO      |     NO        |   NO      |  NO    |     NO      |
+| READY            |     NO        |   -   |   YES    |     NO      |     YES       |   YES     |  YES   |     YES     |
+| MUTATING         |     NO        |  YES  |    -     |     YES     |     NO        |   NO      |  NO    |     YES     |
+| CALLBACKING      |     NO        |  NO   |   YES    |      -      |     NO        |   NO      |  NO    |     NO      |
+| EXTERNALIZING    |     NO        |  YES  |   NO     |     YES     |      -       |   NO      |  NO    |     YES     |
+| FINALIZED        |     NO        |  NO   |   NO     |     NO      |     NO        |   -       |  NO    |     NO      |
+| PAUSED           |     NO        |  YES  |   NO     |     NO      |     NO        |   YES     |  -     |     YES     |
+| MAINTENANCE      |     NO        |  YES  |   YES    |     NO      |     YES       |   NO      |  NO    |      -      |
 
 **Stable phases:**
 - UNINITIALIZED, READY, FINALIZED, PAUSED, MAINTENANCE: contract **must** return to either of those after functions finish executing.
 
 **Unstable phases:**
-- EXTERNALIZING, MUTATING: contract is allowed to be in unstable phases mid-function but **must** return to a stable phase when the call ends.
-- contract **must** return to the most recent stable phase captured on entry (eg., READY -> MUTATING -> READY).
+- MUTATING, CALLBACKING, EXTERNALIZING: contract is allowed to be in unstable phases mid-function but **must** return to a stable phase when the call ends.
+- contract **must** return to the most recent stable phase captured on entry (eg., READY -> MUTATING -> CALLBACKING -> MUTATING -> READY).
 
 
 ## Bit Flag descriptions
@@ -55,16 +59,16 @@ Allowed transitions:
 
 The values below are just defaults - they can be adjusted on a usecase basis.
 
-| Bit Flag / Phase | UNINITIALIZED | READY | MUTATING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
-|------------------|---------------|-------|----------|---------------|-----------|--------|-------------|
-| ALLOW_USER       |      NO       |  YES  |   NO     |    NO         |   NO      |  NO    |     NO      |
-| ALLOW_ADMIN      |      NO       |  YES  |   NO     |    NO         |   NO      |  YES   |     YES     |
-| ALLOW_EXTERNAL   |      NO       |  NO   |   NO     |    YES        |   NO      |  NO    |     YES     |
-| ALLOW_VALUE      |      NO       |  NO   |   NO     |    YES        |   NO      |  NO    |     YES     |
-| ALLOW_WRITES     |      NO       |  NO   |   YES    |    NO         |   NO      |  NO    |     YES     |
-| ALLOW_VIEWS      |      NO       |  YES  |   NO     |    NO         |   YES     |  YES   |     YES     |
-| ALLOW_CALLBACKS  |      NO       |       |   NO     |    ?          |   NO      |  NO    |     YES     |
-| ALLOW_DELEGATECALL|    NO        |  NO   |   NO     |    NO         |   NO      |  NO    |     YES     |
+| Bit Flag / Phase | UNINITIALIZED | READY | MUTATING | CALLBACKING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
+|------------------|---------------|-------|----------|-------------|---------------|-----------|--------|-------------|
+| ALLOW_USER       |      NO       |  YES  |   NO     |    NO       |    NO         |   NO      |  NO    |     NO      |
+| ALLOW_ADMIN      |      NO       |  YES  |   NO     |    NO       |    NO         |   NO      |  YES   |     YES     |
+| ALLOW_EXTERNAL   |      NO       |  NO   |   NO     |    NO       |    YES        |   NO      |  NO    |     YES     |
+| ALLOW_VALUE      |      NO       |  NO   |   NO     |    NO       |    YES        |   NO      |  NO    |     YES     |
+| ALLOW_WRITES     |      NO       |  NO   |   YES    |    NO       |    NO         |   NO      |  NO    |     YES     |
+| ALLOW_VIEWS      |      NO       |  YES  |   NO     |    NO       |    NO         |   YES     |  YES   |     YES     |
+| ALLOW_CALLBACKS  |      NO       |       |   NO     |    YES      |    NO         |   NO      |  NO    |     YES     |
+| ALLOW_DELEGATECALL|    NO        |  NO   |   NO     |    NO       |    NO         |   NO      |  NO    |     YES     |
 
 > Maintenance is the only phase that simultaneously enables `ALLOW_WRITES`, `ALLOW_EXTERNAL`, and `ALLOW_DELEGATECALL` while keeping `ALLOW_USER` off. Transitions are limited to operator-controlled states (READY, PAUSED, or MUTATING) so a runbook can finish a write cycle, hop into Maintenance, run privileged automation, then return to READY or drop into EXTERNALIZING for outbound calls without exposing that power to end users.
 
@@ -302,7 +306,7 @@ Sensitive functions missing `whenNotPaused` can lead to attackers bypassing the 
 
 |  | Description |
 |-----------|-------------|
-| **Victim** | Contract |
+| **Victim** | The contract itself |
 | **Trigger** | missing `whenNotPaused` modifier |
 | **Result** | unguarded function |
 | **Attack** | Attacker drains funds through permitted entrypoint |
@@ -369,6 +373,15 @@ Attack path:
 | **Pause guardian misses a code path** | Rely on developers to remember every function that needs `whenNotPaused`| PhaseGuard puts the entire contract into `PAUSED` phase with a single state transition: policy bits can be tuned to auto-disable `ALLOW_USER`, `ALLOW_EXTERNAL`, and `ALLOW_VALUE` while enabling `ALLOW_ADMIN` if needed. No per-function modifiers |
 
 ## 6 Delegatecall injection paths
+
+Using delegatecall can lead to bad actors injecting malicious calldata to drain funds.
+
+|  | Description |
+|-----------|-------------|
+| **Victim** | The contract itself |
+| **Trigger** | `delegatecall` |
+| **Result** | malicious calldata injection |
+| **Attack** | Attacker runs malicious code on contract's context |
 
 **Example A: SushiSwap Dutch Auction (2021) type hack**
 
@@ -465,14 +478,21 @@ Attack path:
 
 | Security Challenge | Current Standard Solutions | PhaseGuard Solution |
 | :--- | :--- | :--- |
-| **Delegatecall injection path** | Governance allow-lists, handler reviews, and emergency kill switches—all manual and reactive, so a malicious contract continues running attacker code until admins intervene. | user-facing phases (READY, EXTERNALIZING) never permit delegatecall: any attempt from a public entrypoint reverts because `ALLOW_DELEGATECALL` stays at 0. Teams need to enter `MAINTENANCE` (where `ALLOW_DELEGATECALL` is enabled while `ALLOW_USER` is disabled) execute a bounded runbook, then transition back to READY. |
+| **Delegatecall injection path** | Manual governance allow-lists, handler reviews, and emergency kill switches | user-facing phases (READY, EXTERNALIZING) never permit delegatecall: any attempt from a public entrypoint reverts because `ALLOW_DELEGATECALL` stays at 0. Teams need to enter `MAINTENANCE` (where `ALLOW_DELEGATECALL` is enabled while `ALLOW_USER` is disabled) execute a maintenance script or migration, then transition back to READY. |
 
 
 ## 7 Callback exploit within a delegatecalled proxy context 
 
-**Example A: Lendf.Me imBTC (2020) type hack**
+Hook reentrancy that directly mutates vault balances as implementation runs in the proxy’s storage context.
 
-*Mechanism: ERC777 hook reentrancy that directly mutates vault balances as implementation runs in the proxy’s storage context*
+|  | Description |
+|-----------|-------------|
+| **Victim** | The contract itself |
+| **Trigger** | `delegatecall` & ERC777 token callback |
+| **Result** |  hook code runs in the contract's context|
+| **Attack** | Attacker can directly manipulate state |
+
+**Example A: Lendf.Me imBTC (2020) type hack**
 
 ```solidity
 contract LendfMeiBTC is IERC777Recipient {
@@ -540,4 +560,9 @@ Attack path:
 2. They submit a tiny new deposit; `imBTC.transferFrom` transfers assets before `totalSupply` moves, so the exchange rate temporarily inflates by `deltaAssets / oldSupply`.
 3. The ERC777 `tokensReceived` hook reenters `redeemFresh` and cashes out the *entire* preloaded share balance at that inflated price, returning far more imBTC than the attacker just supplied.
 4. Once the hook exits, `mintInternal` finishes, re-crediting fresh shares at the old rate. The attacker reloads the stash and repeats, draining almost the whole ~$25M pool and making a profit. 
+
+| Security Challenge | Current Standard Solutions | PhaseGuard Solution |
+| :--- | :--- | :--- |
+| **Callback exploit in delegatecalled proxy** | Ban ERC777-style tokens, add `nonReentrant` modifiers, or use custom lock flags inside each hook | The guard blocks writes while externalizing, only enables callbacks inside a Callbacking phase with ALLOW_WRITES and ALLOW_EXTERNAL disabled, and forces execution to unwind back to the stable phase recorded on entry, so hooks can’t mutate stale state or loop outbound calls|
+
 
