@@ -1,9 +1,11 @@
 
-## PhaseGuard
+# PhaseGuard
 
 PhaseGuard is a lifecycle layer that routes every call through a shared phase machine, so initialization, mutation, externalization, and finalization follow one enforced order. Policies on each phase encode today’s best practices (init process, CEI, pause/upgrade invariants, and other phase-specific policies) in one guard, replacing scattered modifiers and making lifecycle mistakes structurally impossible.
 
-## Phase Descriptions
+## Architecture
+
+### Phase Descriptions
 
 | ID | Phase          | Type      | Summary                                                                                  |
 |----|----------------|-----------|------------------------------------------------------------------------------------------|
@@ -48,7 +50,9 @@ Allowed transitions:
 - This phase is only accessible from `EXTERNALIZING`. You cannot enter `CALLBACKING` directly from `MUTATING` because a callback implies a preceding external call.
 
 
-## Bit Flag descriptions
+## Configuration 
+
+### Bit Flags
 
 | Bit Flag           | Direction | Purpose                                                     |
 |--------------------|-----------|-------------------------------------------------------------|
@@ -62,7 +66,7 @@ Allowed transitions:
 | ALLOW_DELEGATECALL | Internal  | Allow delegatecall operations                               |
 
 
-## Bit Flag To Phase Matrix 
+## Default Policy Matrix 
 
 The values below are just defaults - they can be adjusted on a usecase basis.
 
@@ -81,7 +85,7 @@ The values below are just defaults - they can be adjusted on a usecase basis.
 
 > The initializer runs with an authorized bootstrap call : deploy -> UNINITIALIZED (all bits off) -> init via bootstrap -> tranistions contract into READY.
 
-## Exploits
+## Solved Vulnerabilities (Exploits)
 
 Below is a list of common exploits PhaseGuard aims to tackle.
 

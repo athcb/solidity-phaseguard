@@ -94,6 +94,15 @@ abstract contract PhaseGuard {
     /// @notice Thrown when entry to a view function is blocked. 
     error ViewsLocked();
 
+    /// @notice Thrown when the contract remains in an unstable phase at the end of a transaction.
+    error PhaseStabilityInvariant();
+    
+    /// @notice Thrown when the stack contains residual states (length != 1) at the end of a transaction.
+    error StackLengthInvariant();
+    
+    /// @notice Thrown when the global phase does not match the resting stack state.
+    error StackStateInvariant();
+
     /*//////////////////////////////////////////////////////////////
                              INITIALIZER
     //////////////////////////////////////////////////////////////*/
@@ -101,7 +110,9 @@ abstract contract PhaseGuard {
     /// @notice Bootstraps the contract from UNINITIALIZED to READY.
     /// @dev Must be called during the constructor or proxy intitialize otherwise the contract will be bricked.
     /// Ensures atomic initialization. 
-    function __PhaseGuard_init() internal {
+    /// @custom:error `TransitionGateLocked()` if the current phase is not `UNINITIALIZED`: initialization can only occur once.
+    /// @custom:error `StackSizeError()` if the `_phaseStack` is not empty.
+    function _phaseGuardInit() internal {
         if(_phase != Phase.UNINITIALIZED) {
             revert TransitionGateLocked();
         }
@@ -116,49 +127,24 @@ abstract contract PhaseGuard {
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
     
-    /// @notice Top-level entry point for state-changing functions.
-    /// @dev Wraps the entire function with start / end logic:
-    /// 1. Checks if invariants hold at function entry.
-    /// 2. Checks access rights based on the current phase's policy.
-    /// 3. If valid, it attempts to enter `Phase.MUTATING` and execute `_enterPhase`.
-    /// 4. Unwinds stack back to previous phase.
-    /// 5. Checks if invariants hold at function exit. 
+    // @notice Top-level entry point for state-changing functions.
+    /// @dev Wraps the function body to enforce the MUTATING phase lifecycle:
+    /// 1. `_withMutatingBefore()`: Validates permissions, checks invariants, and enters phase.
+    /// 2. `_`: Executes function body.
+    /// 3. `_withMutatingAfter()`: Unwinds phase and verifies final invariants.
+    /// @custom:error `PolicyGateLocked()` if neither user nor admin entry is allowed in the current phase.
     modifier withMutating() {
-        _checkInvariants();
-        
-        Phase currentPhase = _phase;
-        uint8 currentPolicy = getPolicy(currentPhase);
-
-        isUserAllowed = (currentPolicy & ALLOW_USER) != 0;
-        isAdminAllowed = (currentPolicy & ALLOW_ADMIN) != 0;
-
-        if(isUserAllowed) {
-            // Pass if user entry is allowed
-        } else if {isAdminAllowed} {
-            // If only admin entry is allowed check access rights
-            // Reverts if not admin
-            _checkAdmin();
-        } else {
-            // If no users / admins are allowed revert
-            revert PolicyGateLocked();
-        }
-        
-        // Only READY and MAINTENANCE can transition to Mutating (forward transitions)
-        // Externalizing can go back to mutating but during the unwinding phase (controlled exit)
-        // ALLOW_ADMIN is also enabled in PAUSED but the transition from PAUSED to MUTATING is not allowed so it reverts in _enterPhase
-        uint8 requiredEntryPolicy = ALLOW_USER | ALLOW_ADMIN;
-        _enterPhase(Phase.MUTATING, requiredEntryPolicy);
-
+        _withMutatingBefore();
         _;
-
-        _exitPhase();
-        _checkInvariants();
+        _withMutatingAfter();
     }
 
     /// @notice Top-level entry point for view functions.
     /// @dev Allows access to view functions only in phases where ALLOW_VIEWS is enabled.
+    /// Should be used in all external / public view functions. 
+    /// View functions without the modifier should be internal helpers. 
     modifier withView() {
-        if(getPolicy(_phase) & ALLOW_VIEWS != ALLOW_VIEWS) revert ViewsLocked();
+        _withView();
         _;
     }
 
@@ -167,10 +153,10 @@ abstract contract PhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Evaluates whether a transition from one state to another is allowed in the transition matrix.
-    /// @dev 
-    /// @param
-    /// @param 
-    /// @returns 
+    /// @dev Includes both forward and backward transitions. E.g., READY -> MUTATING, MUTATING -> READY
+    /// @param from Phase being exited.
+    /// @param  to Phase being entered.
+    /// @return true if the transition is allowed and false otherwise. 
     function isTransitionAllowed(Phase from, Phase to) public pure virtual returns (bool) {
         // UNINITIALIZED (Phase ID 0) Transitions
         if(from == Phase.UNINITIALIZED) {
@@ -224,14 +210,16 @@ abstract contract PhaseGuard {
         return false;
     }
 
-    /// @notice Returns true if given phase is stable.
-    /// @dev Contract state MUST be in a stable state when functions return. 
+    /// @notice Checks whether a given phase is stable or unstable. 
+    /// @dev Contract state MUST both start and end in a stable state when functions are entered or return. 
+    /// @param phase Phase whose stability is being checked.
+    /// @return true if given phase is stable.
     function isStable(Phase phase) public pure returns (bool) {
         if(
             phase == Phase.READY || 
             phase == Phase.FINALIZED ||
             phase == Phase.PAUSED ||
-            phase == MAINTENANCE
+            phase == Phase.MAINTENANCE
         ) {
             return true;
         }
@@ -241,6 +229,8 @@ abstract contract PhaseGuard {
 
     /// @notice Returns policy bitmask for a given phase.
     /// @dev Combines the individual bitflags to get the final uint8 bitmask. Override to customize. 
+    /// @param phase Phase whose policy is being fetched.
+    /// @return uint8 policy of the given phase.
     function getPolicy(Phase phase) public pure virtual returns (uint8) {
         // UNINITIALIZED (Phase ID 0) policy
         if(phase == Phase.UNINITIALIZED) return 0; 
@@ -284,8 +274,13 @@ abstract contract PhaseGuard {
         return 0;
     }
     
-    /// @notice 
-    /// @dev
+    /// @notice Admin protected function that transitions the global phase.
+    /// @dev Protected by _checkAdmin(). 
+    /// Does not allow transitioning to an unstable state (invariant check).
+    /// Does not allow transitioning while operations are ongoing (invariant check).
+    /// Enforces Stable fromPhase -> Stable toPhase.
+    /// @param toPhase phase being entered.
+    /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
     function transitionTo(Phase toPhase) external {
         _checkAdmin();
         _checkInvariants();
@@ -304,15 +299,30 @@ abstract contract PhaseGuard {
 
         _checkInvariants();
     }
-
-    /*//////////////////////////////////////////////////////////////
-                            INTERNAL SCOPED HELPERS
+     /*//////////////////////////////////////////////////////////////
+                           INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
+     /*//////////////////////////////////////////////////////////////
+                            ACCESS CONTROL
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Must be overriden in inherited contracts.
+    /// Checks if `msg.sender` has the required admin rights to allow entry to a new phase.
+    function _checkAdmin() internal view virtual;
+
+    /*//////////////////////////////////////////////////////////////
+                           SCOPED HELPERS
+    //////////////////////////////////////////////////////////////*/
 
     /*//////////////////////////////////////////////////////////////
                              1. EXTERNALIZING
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Manually enters the `EXTERNALIZING` phase to permit outbound external calls.
+    /// @dev Must be paired with `_endExternalizing()` to safely unwind the state.
+    /// Requires the current phase to have `ALLOW_WRITES` (i.e., in `MUTATING`).
+    /// While active, storage writes are disabled to prevent state changes during the external call.
     function _startExternalizing() internal {
         // Only MUTATING can transition to EXTENRNALIZING
         // CALLBACKING can unwind back to EXTENRNALIZING
@@ -320,6 +330,7 @@ abstract contract PhaseGuard {
         _enterPhase(Phase.EXTERNALIZING, requiredEntryPolicy);
     }
 
+    /// @notice Manually unwinds the `EXTERNALIZING` phase.
     function _endExternalizing() internal {
         _exitPhase();
     }
@@ -328,11 +339,16 @@ abstract contract PhaseGuard {
                             2. CALLBACKING
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Scoped helper that manually enters the `EXTERNALIZING` and then `CALLBACKING` phase to permit outbound external calls with callbacks.
+    /// @dev Must be paired with `_endExternalizingWithCallback()` to safely unwind the state.
+    /// To enter the `CALLBACKING` phase, current phase has to be `EXTERNALIZING` (i.e., `ALLOW_EXTERNAL)`.
+    /// While `CALLBACKING` is active, storage writes and entry to user-facing functions are disabled.
     function _startExternalizingWithCallback() internal {
         _startExternalizing();
         _startCallbacking();
     }
 
+    /// @notice Manually unwinds the 1. `CALLBACKING` and then 2. `EXTERNALIZING` phase.
     function _endExternalizingWithCallback() internal {
         // 1. Exit CALLBACKING
         _exitPhase();
@@ -340,20 +356,43 @@ abstract contract PhaseGuard {
         _exitPhase();
     }
 
+    /// @notice Manually enters the `CALLBACKING` phase to handle expected reentrant hooks (e.g., `onERC721Received`).
+    /// @dev Must be paired with `_endCallbacking()` or used via `_endExternalizingWithCallback()`.
+    /// Current phase must be `EXTERNALIZING` (policy allows `ALLOW_EXTERNAL`) otherwise it reverts.
+    /// Enables specific reentrancy paths (`ALLOW_CALLBACKS`) while keeping general user entry (`ALLOW_USER`) locked.
+    /// Use `_startExternalizingWithCallback()` instead of calling this directly to enforce correct nesting.
+    function _startCallbacking() internal {
+        // Only EXTENRNALIZING can transition to CALLBACKING
+        uint8 requiredEntryPolicy = ALLOW_EXTERNAL;
+        _enterPhase(Phase.CALLBACKING, requiredEntryPolicy);
+    }
+
+    /// @notice Manually unwinds the `CALLBACKING` phase.
+    function _endCallbacking() internal {
+        _exitPhase();
+    }
+
     /*//////////////////////////////////////////////////////////////
                             PRIVATE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Internal logic to validate and execute a forward phase transition.
+    /// @dev Gates the transition based on the caller's capabilities (Policy Gate) and the state machine graph (Transition Gate).
+    /// Updates the global `_phase` and pushes the `toPhase` onto `_phaseStack`.
+    /// @param toPhase Phase being entered.
+    /// @param requiredEntryPolicy Bitmask of permissions the current phase must possess to allow this transition.
+    /// @custom:error `PolicyGateLocked()` if the current phase's policy does not contain the required bitmask of permissions.
+    /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
     function _enterPhase(Phase toPhase, uint8 requiredEntryPolicy) private {
         Phase currentPhase = _phase;
 
-        // Check Policy
+        // Policy Gate: Check current policy against required permissions 
         uint8 currentPolicy = getPolicy(currentPhase);
-        if(currentPolicy & requiredEntryPolicy[i] == 0) {
+        if( (currentPolicy & requiredEntryPolicy) == 0) {
             revert PolicyGateLocked();
         }
 
-        // Check Transition Matrix 
+        // Transition Gate: Check if transition is allowed in the transition matrix 
         bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
         if(!isAllowed) revert TransitionGateLocked();
         
@@ -363,6 +402,11 @@ abstract contract PhaseGuard {
         emit PhaseTransition(currentPhase, toPhase);
     }
 
+    /// @notice Internal logic to unwind the phase stack and return to the previous phase.
+    /// @dev Reverses the action of `_enterPhase`.
+    /// @custom:error `StackSizeError()` if operation attempts to pop the base state.
+    /// @custom:error `StackInconsistencyError()` if global `_phase` desynchronized from the stack.
+    /// @custom:error `TransitionGateLocked()` if the unwind path is invalid in the matrix.
     function _exitPhase() private {
         Phase currentPhase = _phase;
 
@@ -387,28 +431,68 @@ abstract contract PhaseGuard {
         emit PhaseTransition(fromPhase, toPhase);
     }
 
-    /// @notice Invariant checks that must hold when entering and exiting a phase.
-    /// @dev 
-    /// PhaseStability: The global phase must be stable when entering a new phase 
-    /// StackLength: _phaseStack should only contain one element (the current phase). That shows that we are not in a mid-function operation.
-    /// StackState: The stack element should be the same as the global phase.
-    function _checkInvariants() private {
+    /// @notice Ensures the contract is in a valid resting state.
+    /// @dev Checks three conditions required for a valid resting state:
+    /// 1. Stability: Global phase functions must return to a `Stable` state (e.g., READY, MAINTENANCE).
+    /// 2. Stack Cleanliness: Stack length must be exactly 1 (containing only the base state).
+    /// 3. Consistency: The stack's single element must match the global `_phase`.
+    /// @custom:error `PhaseStabilityInvariant()` if the contract ends in an unstable state.
+    /// @custom:error `StackLengthInvariant()` if the stack was not unwound correctly.
+    /// @custom:error `StackStateInvariant()` if global phase desynchronized from the base stack.
+    function _checkInvariants() private view {
         Phase currentPhase = _phase;
         if(!isStable(currentPhase)) revert PhaseStabilityInvariant();
         if(_phaseStack.length != 1) revert StackLengthInvariant();
         if(currentPhase != _phaseStack[0]) revert StackStateInvariant();
     }
 
-    function _startCallbacking() private {
-        // Only EXTENRNALIZING can transition to CALLBACKING
-        uint8 requiredEntryPolicy = ALLOW_EXTERNAL;
-        _enterPhase(Phase.CALLBACKING, requiredEntryPolicy);
+    /// @notice Pre-execution guard logic for the Mutating modifier.
+    /// @dev Performed steps:
+    /// 1. Checks pre-execution invariants to ensure atomic start state.
+    /// 2. Evaluates current policy permissions:
+    ///    - If `ALLOW_USER` bit is set: Access granted.
+    ///    - If only `ALLOW_ADMIN` bit is set: Calls `_checkAdmin()` (must revert if unauthorized).
+    ///    - If neither: Reverts with `PolicyGateLocked`.
+    /// 3. Calls `_enterPhase` to transition to `Phase.MUTATING`.
+    function _withMutatingBefore() private {
+        _checkInvariants();
+        
+        Phase currentPhase = _phase;
+        uint8 currentPolicy = getPolicy(currentPhase);
+
+        // Check access rights:
+        bool isUserAllowed = (currentPolicy & ALLOW_USER) != 0;
+        bool isAdminAllowed = (currentPolicy & ALLOW_ADMIN) != 0;
+
+        if(isUserAllowed) {
+            // Pass if user entry is allowed.
+        } else if (isAdminAllowed) {
+            // If only admin entry is allowed check access rights (reverts if not admin):
+            _checkAdmin();
+        } else {
+            // If no users / admins are allowed revert:
+            revert PolicyGateLocked();
+        }
+        
+        // Only READY and MAINTENANCE can transition to Mutating (forward transitions).
+        // Externalizing can go back to mutating but during the unwinding phase (i.e., controlled exit).
+        // ALLOW_ADMIN is also enabled in PAUSED but the transition from PAUSED to MUTATING is not allowed so it reverts in _enterPhase().
+        uint8 requiredEntryPolicy = ALLOW_USER | ALLOW_ADMIN;
+        _enterPhase(Phase.MUTATING, requiredEntryPolicy);
     }
 
-    /// @dev Must be overriden in inherited contracts.
-    /// Checks if `msg.sender` has the required admin rights to allow entry to a new phase.
-    function _checkAdmin() internal view virtual;
+    /// @notice Post-execution cleanup logic for the Mutating modifier.
+    /// @dev Performed steps:
+    /// 1. Calls `_exitPhase` to pop the stack and return to the previous stable phase.
+    /// 2. Checks post-execution invariants to ensure the contract is not left in a dirty state.
+    function _withMutatingAfter() private {
+        _exitPhase();
+        _checkInvariants();
+    }
 
-    
+    /// @dev Internal helper for `withView`. Wraps logic to reduce bytecode size.
+    function _withView() private view {
+        if( (getPolicy(_phase) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
+    }
 
 }
