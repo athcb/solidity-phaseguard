@@ -82,9 +82,9 @@ The values below are just defaults - they can be adjusted on a usecase basis.
 | ALLOW_CALLBACKS  |      NO       |       |   NO     |    YES      |    NO         |   NO      |  NO    |     YES     |
 | ALLOW_DELEGATECALL|    NO        |  NO   |   NO     |    NO       |    NO         |   NO      |  NO    |     YES     |
 
-> Maintenance is the only phase that simultaneously enables `ALLOW_WRITES`, `ALLOW_EXTERNAL`, and `ALLOW_DELEGATECALL` while keeping `ALLOW_USER` off. Transitions are limited to operator-controlled states (READY, PAUSED, or MUTATING) so a runbook can finish a write cycle, hop into Maintenance, run privileged automation, then return to READY or drop into EXTERNALIZING for outbound calls without exposing that power to end users.
+- Maintenance is the only phase that simultaneously enables `ALLOW_WRITES`, `ALLOW_EXTERNAL`, and `ALLOW_DELEGATECALL` while keeping `ALLOW_USER` off. Transitions are limited to operator-controlled states (READY, PAUSED, or MUTATING) so a runbook can finish a write cycle, tranistion into Maintenance, run privileged automation, then return to READY or go into EXTERNALIZING for outbound calls without exposing that power to end users.
 
-> The initializer runs with an authorized bootstrap call : deploy -> UNINITIALIZED (all bits off) -> init via bootstrap -> tranistions contract into READY.
+- The initializer runs with an authorized bootstrap call: deploy -> UNINITIALIZED (all bits off) -> init via `_phaseGuardInit()` -> tranistions contract into READY.
 
 ## Solved Vulnerabilities (Exploits)
 

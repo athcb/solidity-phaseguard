@@ -3,9 +3,15 @@ pragma solidity 0.8.30;
 
 /// @title PhaseGuard State Machine
 /// @author 0xathcb
-/// @notice Abstract contract for managing phase transitions and security policies:
-/// Eliminates security vulnerabilities originating from unguarded phase transitions (e.g., reentrancy, read-only reentrancy, uninitialized state, callback / delegatecall loopholes etc.).
-/// @dev Inheriting contracts must override `_checkAdmin()` with their access control policy (e.g., Ownable, AccessControl).
+/// @notice PhaseGuard eliminates lifecycle security vulnerabilities by enforcing a rigid state machine for every contract call.
+/// It uses a unified guard to guarantee that initialization, CEI compliance, pause logic, and context integrity 
+/// follow an unbreakable order—making reentrancy, re-initialization, and inconsistent state exploits structurally impossible.
+/// @dev Abstract contract implementing a stack-based Finite State Machine (FSM).
+/// 1. Call `_phaseGuardInit()` during initialization (Constructor or Proxy Init).
+/// 2. Override `_checkAdmin()` to enforce access control (e.g., `Ownable`, `AccessControl`).
+/// 3. Apply the `withMutating` modifier to all external state-changing functions.
+/// 4. Apply the `withView` modifier to all external view functions.
+/// 5. Wrap all external calls in `_startExternalizing()` / `_endExternalizing()` or `_startExternalizingWithCallback()` / `_endExternalizingWithCallback()`.
 abstract contract PhaseGuard {
 
     /*//////////////////////////////////////////////////////////////
@@ -22,7 +28,7 @@ abstract contract PhaseGuard {
         CALLBACKING, // 4: Transient hook window, unstable
         FINALIZED, // 5: Terminal locked state, stable
         PAUSED, // 6: Temporary locked state, stable
-        MAINTENANCE // 7: dmin-only maintenance/upgrade window, stable
+        MAINTENANCE // 7: Admin-only maintenance/upgrade window, stable
     }
     
     /*//////////////////////////////////////////////////////////////
@@ -108,7 +114,7 @@ abstract contract PhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Bootstraps the contract from UNINITIALIZED to READY.
-    /// @dev Must be called during the constructor or proxy intitialize otherwise the contract will be bricked.
+    /// @dev Must be called during the constructor or proxy initialize otherwise the contract will be bricked.
     /// Ensures atomic initialization. 
     /// @custom:error `TransitionGateLocked()` if the current phase is not `UNINITIALIZED`: initialization can only occur once.
     /// @custom:error `StackSizeError()` if the `_phaseStack` is not empty.
@@ -324,8 +330,8 @@ abstract contract PhaseGuard {
     /// Requires the current phase to have `ALLOW_WRITES` (i.e., in `MUTATING`).
     /// While active, storage writes are disabled to prevent state changes during the external call.
     function _startExternalizing() internal {
-        // Only MUTATING can transition to EXTENRNALIZING
-        // CALLBACKING can unwind back to EXTENRNALIZING
+        // Only MUTATING can transition to EXTERNALIZING
+        // CALLBACKING can unwind back to EXTERNALIZING
         uint8 requiredEntryPolicy = ALLOW_WRITES;
         _enterPhase(Phase.EXTERNALIZING, requiredEntryPolicy);
     }
