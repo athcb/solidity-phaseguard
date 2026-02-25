@@ -5,7 +5,7 @@ pragma solidity 0.8.30;
 /// @author 0xathcb
 /// @notice PhaseGuard eliminates lifecycle security vulnerabilities by enforcing a rigid state machine for every contract call.
 /// It uses a unified guard to guarantee that initialization, CEI compliance, pause logic, and context integrity 
-/// follow an unbreakable order—making reentrancy, re-initialization, and inconsistent state exploits structurally impossible.
+/// follow a strict order making reentrancy, re-initialization, and inconsistent state exploits structurally impossible.
 /// @dev Abstract contract implementing a stack-based Finite State Machine (FSM).
 /// 1. Call `_phaseGuardInit()` during initialization (Constructor or Proxy Init).
 /// 2. Override `_checkAdmin()` to enforce access control (e.g., `Ownable`, `AccessControl`).
@@ -38,16 +38,9 @@ abstract contract PhaseGuard {
     /// @dev Global contract phase.
     Phase internal _phase;
     
-    /// @dev Stack of phases tracked during each function call. Always contains the current _phase as the first element.
-    /// E.g., 
-    /// ```text
-    ///.    READY 
-    ///            -> MUTATING 
-    ///                        -> EXTERNALIZING 
-    ///            <- MUTATING <-
-    ///  <- READY
-    /// ```
-    /// _phaseStack: 1. [READY] 2. [READY, MUTATING] 3. [READY, MUTATING, EXTERNALIZING] 4. [READY, MUTATING] 5. [READY]
+    /// @dev Stack of phases tracked during each function call. Used to unwind nested transitions.
+    /// First element is always the resting stable phase.
+    /// E.g.,  1. [READY] 2. [READY, MUTATING] 3. [READY, MUTATING, EXTERNALIZING] 4. [READY, MUTATING] 5. [READY]
     Phase[] internal _phaseStack;
 
     /*//////////////////////////////////////////////////////////////
@@ -114,8 +107,24 @@ abstract contract PhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Bootstraps the contract from UNINITIALIZED to READY.
-    /// @dev Must be called during the constructor or proxy initialize otherwise the contract will be bricked.
+    /// @dev Must be called during the constructor or proxy `initialize` otherwise the contract will be bricked.
     /// Ensures atomic initialization. 
+    ///
+    /// Example with a constructor:
+    /// ```solidity
+    /// constructor() {
+    ///     _phaseGuardInit();
+    /// }
+    /// ```
+    ///
+    /// Example when using OZ UUPS proxy:
+    /// ```solidity
+    /// function initialize() external initializer {
+    ///     __Ownable_init(msg.sender);
+    ///     _phaseGuardInit();
+    /// }
+    /// ```
+    /// 
     /// @custom:error `TransitionGateLocked()` if the current phase is not `UNINITIALIZED`: initialization can only occur once.
     /// @custom:error `StackSizeError()` if the `_phaseStack` is not empty.
     function _phaseGuardInit() internal {
@@ -133,7 +142,7 @@ abstract contract PhaseGuard {
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
     
-    // @notice Top-level entry point for state-changing functions.
+    /// @notice Top-level entry point for state-changing functions.
     /// @dev Wraps the function body to enforce the MUTATING phase lifecycle:
     /// 1. `_withMutatingBefore()`: Validates permissions, checks invariants, and enters phase.
     /// 2. `_`: Executes function body.
@@ -158,61 +167,51 @@ abstract contract PhaseGuard {
                            PUBLIC FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Evaluates whether a transition from one state to another is allowed in the transition matrix.
-    /// @dev Includes both forward and backward transitions. E.g., READY -> MUTATING, MUTATING -> READY
+    /// @notice Evaluates whether a forward transition from one phase to another is allowed in the transition matrix.
+    /// @dev Encodes only forward transitions. Reverse transitions (stack unwinding) are handled
+    /// implicitly by `_exitPhase` which restores the previous phase from the stack.
     /// @param from Phase being exited.
     /// @param  to Phase being entered.
     /// @return true if the transition is allowed and false otherwise. 
     function isTransitionAllowed(Phase from, Phase to) public pure virtual returns (bool) {
         // UNINITIALIZED (Phase ID 0) Transitions
         if(from == Phase.UNINITIALIZED) {
-            return to == Phase.READY;
+            return to == Phase.READY; 
         }
 
         // READY (Phase ID 1) Transitions
         if(from == Phase.READY) {
-            return to == Phase.MUTATING ||
-                   to == Phase.FINALIZED ||
-                   to == Phase.PAUSED ||
+            return to == Phase.MUTATING || 
+                   to == Phase.FINALIZED || 
+                   to == Phase.PAUSED || 
                    to == Phase.MAINTENANCE; 
         }
 
         // MUTATING (Phase ID 2) Transitions
         if(from == Phase.MUTATING) {
-            return to == Phase.READY ||
-                   to == Phase.EXTERNALIZING ||
-                   to == Phase.MAINTENANCE;
+            return to == Phase.EXTERNALIZING; 
         }
 
-        // CALLBACKING (Phase ID 3) Transitions
-        if(from == Phase.CALLBACKING) {
-            return to == Phase.EXTERNALIZING;
-        }
-
-        // EXTERNALIZING (Phase ID 4) Transitions
+        // EXTERNALIZING (Phase ID 3) Transitions
         if(from == Phase.EXTERNALIZING) {
-            return to == Phase.MUTATING ||
-                   to == Phase.CALLBACKING;
-        }
-
-        // FINALIZED (Phase ID 5) Transitions
-        if(from == Phase.FINALIZED) {
-            return false;
+            return to == Phase.CALLBACKING;
         }
 
         // PAUSED (Phase ID 6) Transitions
         if(from == Phase.PAUSED) {
-            return to == Phase.READY ||
-                   to == Phase.MAINTENANCE ||
-                   to == Phase.FINALIZED;
+            return to == Phase.READY || 
+                   to == Phase.MAINTENANCE || 
+                   to == Phase.FINALIZED; 
         }
 
         // MAINTENANCE (Phase ID 7) Transitions
         if(from == Phase.MAINTENANCE) {
-            return to == Phase.READY ||
-                   to == Phase.MUTATING;
+            return to == Phase.READY || 
+                   to == Phase.MUTATING; 
         }
 
+        // CALLBACKING (Phase ID 4): No forward transitions.
+        // FINALIZED (Phase ID 5): Terminal state, no transitions allowed.
         return false;
     }
 
@@ -251,19 +250,19 @@ abstract contract PhaseGuard {
             return ALLOW_WRITES;
         }
 
-        // CALLBACKING (Phase ID 3) policy
-        if(phase == Phase.CALLBACKING) {
-            return ALLOW_CALLBACKS;
-        }
-
-        // EXTERNALIZING (Phase ID 4) policy
+        // EXTERNALIZING (Phase ID 3) policy
         if(phase == Phase.EXTERNALIZING) {
             return ALLOW_EXTERNAL | ALLOW_VALUE;
         }
 
+        // CALLBACKING (Phase ID 4) policy
+        if(phase == Phase.CALLBACKING) {
+            return ALLOW_CALLBACKS;
+        }
+
         // FINALIZED (Phase ID 5) policy
         if(phase == Phase.FINALIZED) {
-            return 0;
+            return ALLOW_VIEWS;
         }
 
         // PAUSED (Phase ID 6) policy
@@ -287,34 +286,48 @@ abstract contract PhaseGuard {
     /// Enforces Stable fromPhase -> Stable toPhase.
     /// @param toPhase phase being entered.
     /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
-    function transitionTo(Phase toPhase) external {
+    function transitionTo(Phase toPhase) external virtual {
         _checkAdmin();
         _checkInvariants();
 
         Phase currentPhase = _phase;
 
-        // Check Transition Matrix 
+        // Fail early: avoids wasting gas on SSTOREs that would be reverted by _checkInvariants().
+        if(!isStable(toPhase)) revert PhaseStabilityInvariant();
+
+        // Transition Gate
         bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
         if(!isAllowed) revert TransitionGateLocked();
         
         // State update
         _phase = toPhase;
-        _phaseStack.pop();
-        _phaseStack.push(toPhase);
+        _phaseStack[0] = toPhase;
         emit PhaseTransition(currentPhase, toPhase);
 
         _checkInvariants();
     }
      /*//////////////////////////////////////////////////////////////
-                           INTERNAL FUNCTIONS
+                           INTERNAL FUNCTIONS / ACCESS CONTROL
     //////////////////////////////////////////////////////////////*/
 
-     /*//////////////////////////////////////////////////////////////
-                            ACCESS CONTROL
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev Must be overriden in inherited contracts.
-    /// Checks if `msg.sender` has the required admin rights to allow entry to a new phase.
+    /// @notice Admin access control hook. Must revert if `msg.sender` is not authorized.
+    /// @dev Must be overridden in inherited contracts.
+    /// Used internally by PhaseGuard to gate phase entry. 
+    /// Do NOT use for per-function access control: use OZ `onlyOwner()` or `onlyRole()` directly on the function instead.
+    /// 
+    /// Example using OZ Ownable:
+    /// ```solidity
+    /// function _checkAdmin() internal view override {
+    ///     if(msg.sender != owner()) revert AccessDenied(msg.sender);
+    /// }
+    /// ```
+    /// 
+    /// Example using OZ AccessControl:
+    /// ```solidity
+    /// function _checkAdmin() internal view override {
+    ///     _checkRole(DEFAULT_ADMIN_ROLE);
+    /// }
+    /// ```
     function _checkAdmin() internal view virtual;
 
     /*//////////////////////////////////////////////////////////////
@@ -327,8 +340,8 @@ abstract contract PhaseGuard {
 
     /// @notice Manually enters the `EXTERNALIZING` phase to permit outbound external calls.
     /// @dev Must be paired with `_endExternalizing()` to safely unwind the state.
-    /// Requires the current phase to have `ALLOW_WRITES` (i.e., in `MUTATING`).
-    /// While active, storage writes are disabled to prevent state changes during the external call.
+    /// Requires the current phase to have `ALLOW_WRITES` (i.e., in MUTATING or MAINTENANCE).
+    /// While EXTERNALIZING is active, storage writes are disabled to prevent state changes during the external call.
     function _startExternalizing() internal {
         // Only MUTATING can transition to EXTERNALIZING
         // CALLBACKING can unwind back to EXTERNALIZING
@@ -368,7 +381,7 @@ abstract contract PhaseGuard {
     /// Enables specific reentrancy paths (`ALLOW_CALLBACKS`) while keeping general user entry (`ALLOW_USER`) locked.
     /// Use `_startExternalizingWithCallback()` instead of calling this directly to enforce correct nesting.
     function _startCallbacking() internal {
-        // Only EXTENRNALIZING can transition to CALLBACKING
+        // Only EXTERNALIZING can transition to CALLBACKING
         uint8 requiredEntryPolicy = ALLOW_EXTERNAL;
         _enterPhase(Phase.CALLBACKING, requiredEntryPolicy);
     }
@@ -383,7 +396,9 @@ abstract contract PhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Internal logic to validate and execute a forward phase transition.
-    /// @dev Gates the transition based on the caller's capabilities (Policy Gate) and the state machine graph (Transition Gate).
+    /// @dev Two gates must pass before the transition is executed:
+    /// 1. Policy Gate: Current phase must have the required permission bits. 
+    /// 2. Transition Gate: The transition must be allowed in the matrix. 
     /// Updates the global `_phase` and pushes the `toPhase` onto `_phaseStack`.
     /// @param toPhase Phase being entered.
     /// @param requiredEntryPolicy Bitmask of permissions the current phase must possess to allow this transition.
@@ -409,30 +424,26 @@ abstract contract PhaseGuard {
     }
 
     /// @notice Internal logic to unwind the phase stack and return to the previous phase.
-    /// @dev Reverses the action of `_enterPhase`.
+    /// @dev Reverses the action of `_enterPhase` by popping the stack.
+    /// No transition matrix check needed: the reverse path is guaranteed valid because the forward path was validated by `_enterPhase` on entry.
     /// @custom:error `StackSizeError()` if operation attempts to pop the base state.
     /// @custom:error `StackInconsistencyError()` if global `_phase` desynchronized from the stack.
-    /// @custom:error `TransitionGateLocked()` if the unwind path is invalid in the matrix.
     function _exitPhase() private {
-        Phase currentPhase = _phase;
-
         // Stack size check: stack should contain at least the current and previous phases for _exitPhase to work. 
         uint256 stackSize = _phaseStack.length;
         if(stackSize < 2) revert StackSizeError();
 
-        // Phase at top of the stack should be the same as global phase:
+        // Phase at top of the stack should be the same as global phase.
         Phase fromPhase = _phaseStack[stackSize - 1];
-        if(fromPhase != currentPhase) revert StackInconsistencyError();
+        if(fromPhase != _phase) revert StackInconsistencyError();
 
-        // Get previous phase from stack:
+        // Get previous phase from stack.
         Phase toPhase = _phaseStack[stackSize - 2];
 
-        // Check that transition is allowed in the Transition Matrix: 
-        bool isAllowed = isTransitionAllowed(fromPhase, toPhase);
-        if(!isAllowed) revert TransitionGateLocked();
-
-        // Pop the current phase and restore the previous phase: 
+        // Pop the current phase.
         _phaseStack.pop();
+
+        // Restore the previous phase.
         _phase = toPhase;
         emit PhaseTransition(fromPhase, toPhase);
     }
@@ -470,19 +481,21 @@ abstract contract PhaseGuard {
         bool isUserAllowed = (currentPolicy & ALLOW_USER) != 0;
         bool isAdminAllowed = (currentPolicy & ALLOW_ADMIN) != 0;
 
-        if(isUserAllowed) {
-            // Pass if user entry is allowed.
-        } else if (isAdminAllowed) {
-            // If only admin entry is allowed check access rights (reverts if not admin):
-            _checkAdmin();
-        } else {
-            // If no users / admins are allowed revert:
-            revert PolicyGateLocked();
+        // Pass if isUserAllowed = true
+        if(!isUserAllowed) {
+            if (isAdminAllowed) {
+                // If only admin entry is allowed check access rights (reverts if not admin):
+                _checkAdmin();
+            } else {
+                // If no users / admins are allowed revert:
+                revert PolicyGateLocked();
+            }
         }
         
-        // Only READY and MAINTENANCE can transition to Mutating (forward transitions).
-        // Externalizing can go back to mutating but during the unwinding phase (i.e., controlled exit).
-        // ALLOW_ADMIN is also enabled in PAUSED but the transition from PAUSED to MUTATING is not allowed so it reverts in _enterPhase().
+        // Require ALLOW_USER or ALLOW_ADMIN on the current phase to enter MUTATING.
+        // Only READY (user + admin) and MAINTENANCE (admin only) satisfy both the policy
+        // and the transition matrix. PAUSED has ALLOW_ADMIN but PAUSED -> MUTATING is
+        // blocked by the transition gate inside `_enterPhase`.
         uint8 requiredEntryPolicy = ALLOW_USER | ALLOW_ADMIN;
         _enterPhase(Phase.MUTATING, requiredEntryPolicy);
     }
