@@ -13,8 +13,8 @@ PhaseGuard is a lifecycle layer that routes every call through a shared phase ma
 | 0  | Uninitialized  | Unstable  | Not initialized (initializer/init step pending): must be initialized in the same tx as deployment. |
 | 1  | Ready          | Stable    | Initialized, stable: user/admin entrypoints and reads allowed.                           |
 | 2  | Mutating       | Unstable  | Write phase: storage updates allowed, outbound calls/value blocked.                      |
-| 3  | Callbacking    | Unstable  | Transient hook window: inbound callbacks allowed, writes/external calls disabled.        |
-| 4  | Externalizing  | Unstable  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
+| 3  | Externalizing  | Unstable  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
+| 4  | Callbacking    | Unstable  | Transient hook window: inbound callbacks allowed, writes/external calls disabled.        |
 | 5  | Finalized      | Stable    | Terminal locked state: no transitions, writes, or calls.                                 |
 | 6  | Paused         | Stable    | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
 | 7  | Maintenance    | Stable    | Admin-only maintenance/upgrade window: user entrypoints stay blocked while delegatecall/external automation runs under stricter policy bits. |
