@@ -220,16 +220,10 @@ abstract contract PhaseGuard {
     /// @param phase Phase whose stability is being checked.
     /// @return true if given phase is stable.
     function isStable(Phase phase) public pure returns (bool) {
-        if(
-            phase == Phase.READY || 
-            phase == Phase.FINALIZED ||
-            phase == Phase.PAUSED ||
-            phase == Phase.MAINTENANCE
-        ) {
-            return true;
-        }
-
-        return false;
+        return phase == Phase.READY || 
+               phase == Phase.FINALIZED ||
+               phase == Phase.PAUSED ||
+               phase == Phase.MAINTENANCE;
     } 
 
     /// @notice Returns policy bitmask for a given phase.
@@ -340,7 +334,7 @@ abstract contract PhaseGuard {
 
     /// @notice Manually enters the `EXTERNALIZING` phase to permit outbound external calls.
     /// @dev Must be paired with `_endExternalizing()` to safely unwind the state.
-    /// Requires the current phase to have `ALLOW_WRITES` (i.e., in MUTATING or MAINTENANCE).
+    /// Requires the current phase to have `ALLOW_WRITES` (i.e., in MUTATING).
     /// While EXTERNALIZING is active, storage writes are disabled to prevent state changes during the external call.
     function _startExternalizing() internal {
         // Only MUTATING can transition to EXTERNALIZING
@@ -360,7 +354,7 @@ abstract contract PhaseGuard {
 
     /// @notice Scoped helper that manually enters the `EXTERNALIZING` and then `CALLBACKING` phase to permit outbound external calls with callbacks.
     /// @dev Must be paired with `_endExternalizingWithCallback()` to safely unwind the state.
-    /// To enter the `CALLBACKING` phase, current phase has to be `EXTERNALIZING` (i.e., `ALLOW_EXTERNAL)`.
+    /// To enter the `CALLBACKING` phase, current phase has to be `EXTERNALIZING` (i.e., `ALLOW_EXTERNAL`).
     /// While `CALLBACKING` is active, storage writes and entry to user-facing functions are disabled.
     function _startExternalizingWithCallback() internal {
         _startExternalizing();
