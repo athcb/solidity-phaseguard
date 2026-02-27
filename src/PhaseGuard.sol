@@ -164,7 +164,64 @@ abstract contract PhaseGuard {
     }
 
     /*//////////////////////////////////////////////////////////////
-                           PUBLIC FUNCTIONS
+                        EXTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Admin protected function that transitions the global phase.
+    /// @dev Protected by _checkAdmin(). 
+    /// Does not allow transitioning to an unstable state (invariant check).
+    /// Does not allow transitioning while operations are ongoing (invariant check).
+    /// Enforces Stable fromPhase -> Stable toPhase.
+    /// @param toPhase phase being entered.
+    /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
+    function transitionTo(Phase toPhase) external virtual {
+        _checkAdmin();
+        _checkInvariants();
+
+        Phase currentPhase = _phase;
+
+        // Fail early: avoids wasting gas on SSTOREs that would be reverted by _checkInvariants().
+        if(!isStable(toPhase)) revert PhaseStabilityInvariant();
+
+        // Transition Gate
+        bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
+        if(!isAllowed) revert TransitionGateLocked();
+        
+        // State update
+        _phase = toPhase;
+        _phaseStack[0] = toPhase;
+        emit PhaseTransition(currentPhase, toPhase);
+
+        _checkInvariants();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        PUBLIC VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Returns the current global phase of the contract.
+    /// @return The current `Phase` enum value.
+    function phase() public view returns (Phase) {
+        return _phase;
+    }
+
+    /// @notice Returns the current depth of the phase stack.
+    /// @dev At rest the stack depth is 1 (containing only the base stable phase).
+    /// A depth greater than 1 indicates the contract is mid-operation.
+    /// @return The number of entries in `_phaseStack`.
+    function phaseStackDepth() public view returns (uint256) {
+        return _phaseStack.length;
+    }
+
+    /// @notice Returns the base (resting) phase at the bottom of the stack.
+    /// @dev At rest, this should always equal `phase()`.
+    /// @return The first element of `_phaseStack`.
+    function phaseStackBase() public view returns (Phase) {
+        return _phaseStack[0];
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        PUBLIC PURE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Evaluates whether a forward transition from one phase to another is allowed in the transition matrix.
@@ -217,55 +274,55 @@ abstract contract PhaseGuard {
 
     /// @notice Checks whether a given phase is stable or unstable. 
     /// @dev Contract state MUST both start and end in a stable state when functions are entered or return. 
-    /// @param phase Phase whose stability is being checked.
+    /// @param phase_ Phase whose stability is being checked.
     /// @return true if given phase is stable.
-    function isStable(Phase phase) public pure returns (bool) {
-        return phase == Phase.READY || 
-               phase == Phase.FINALIZED ||
-               phase == Phase.PAUSED ||
-               phase == Phase.MAINTENANCE;
+    function isStable(Phase phase_) public pure returns (bool) {
+        return phase_ == Phase.READY || 
+               phase_ == Phase.FINALIZED ||
+               phase_ == Phase.PAUSED ||
+               phase_ == Phase.MAINTENANCE;
     } 
 
     /// @notice Returns policy bitmask for a given phase.
     /// @dev Combines the individual bitflags to get the final uint8 bitmask. Override to customize. 
-    /// @param phase Phase whose policy is being fetched.
+    /// @param phase_ Phase whose policy is being fetched.
     /// @return uint8 policy of the given phase.
-    function getPolicy(Phase phase) public pure virtual returns (uint8) {
+    function getPolicy(Phase phase_) public pure virtual returns (uint8) {
         // UNINITIALIZED (Phase ID 0) policy
-        if(phase == Phase.UNINITIALIZED) return 0; 
+        if(phase_ == Phase.UNINITIALIZED) return 0; 
 
         // READY (Phase ID 1) policy
-        if(phase == Phase.READY) {
+        if(phase_ == Phase.READY) {
             return ALLOW_USER | ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // MUTATING (Phase ID 2) policy
-        if(phase == Phase.MUTATING) {
+        if(phase_ == Phase.MUTATING) {
             return ALLOW_WRITES;
         }
 
         // EXTERNALIZING (Phase ID 3) policy
-        if(phase == Phase.EXTERNALIZING) {
+        if(phase_ == Phase.EXTERNALIZING) {
             return ALLOW_EXTERNAL | ALLOW_VALUE;
         }
 
         // CALLBACKING (Phase ID 4) policy
-        if(phase == Phase.CALLBACKING) {
+        if(phase_ == Phase.CALLBACKING) {
             return ALLOW_CALLBACKS;
         }
 
         // FINALIZED (Phase ID 5) policy
-        if(phase == Phase.FINALIZED) {
+        if(phase_ == Phase.FINALIZED) {
             return ALLOW_VIEWS;
         }
 
         // PAUSED (Phase ID 6) policy
-        if(phase == Phase.PAUSED) {
+        if(phase_ == Phase.PAUSED) {
             return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // MAINTENANCE (Phase ID 7) policy
-        if(phase == Phase.MAINTENANCE) {
+        if(phase_ == Phase.MAINTENANCE) {
             return ALLOW_ADMIN | ALLOW_EXTERNAL | ALLOW_VALUE | ALLOW_WRITES | ALLOW_VIEWS | ALLOW_CALLBACKS | ALLOW_DELEGATECALL;
         }
 
@@ -273,34 +330,8 @@ abstract contract PhaseGuard {
         return 0;
     }
     
-    /// @notice Admin protected function that transitions the global phase.
-    /// @dev Protected by _checkAdmin(). 
-    /// Does not allow transitioning to an unstable state (invariant check).
-    /// Does not allow transitioning while operations are ongoing (invariant check).
-    /// Enforces Stable fromPhase -> Stable toPhase.
-    /// @param toPhase phase being entered.
-    /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
-    function transitionTo(Phase toPhase) external virtual {
-        _checkAdmin();
-        _checkInvariants();
 
-        Phase currentPhase = _phase;
-
-        // Fail early: avoids wasting gas on SSTOREs that would be reverted by _checkInvariants().
-        if(!isStable(toPhase)) revert PhaseStabilityInvariant();
-
-        // Transition Gate
-        bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
-        if(!isAllowed) revert TransitionGateLocked();
-        
-        // State update
-        _phase = toPhase;
-        _phaseStack[0] = toPhase;
-        emit PhaseTransition(currentPhase, toPhase);
-
-        _checkInvariants();
-    }
-     /*//////////////////////////////////////////////////////////////
+    /*//////////////////////////////////////////////////////////////
                            INTERNAL FUNCTIONS / ACCESS CONTROL
     //////////////////////////////////////////////////////////////*/
 
@@ -343,7 +374,8 @@ abstract contract PhaseGuard {
         _enterPhase(Phase.EXTERNALIZING, requiredEntryPolicy);
     }
 
-    /// @notice Manually unwinds the `EXTERNALIZING` phase.
+    /// @notice Unwinds the `EXTERNALIZING` phase.
+    /// @dev Must be paired with `_startExternalizing()`.
     function _endExternalizing() internal {
         _exitPhase();
     }
@@ -361,7 +393,8 @@ abstract contract PhaseGuard {
         _startCallbacking();
     }
 
-    /// @notice Manually unwinds the 1. `CALLBACKING` and then 2. `EXTERNALIZING` phase.
+    /// @notice Unwinds both the `CALLBACKING` and `EXTERNALIZING` phases (two stack frames).
+    /// @dev Must be paired with `_startExternalizingWithCallback()`.
     function _endExternalizingWithCallback() internal {
         // 1. Exit CALLBACKING
         _exitPhase();
@@ -380,7 +413,8 @@ abstract contract PhaseGuard {
         _enterPhase(Phase.CALLBACKING, requiredEntryPolicy);
     }
 
-    /// @notice Manually unwinds the `CALLBACKING` phase.
+    /// @notice Unwinds the `CALLBACKING` phase.
+    /// @dev Must be paired with `_startCallbacking()`.
     function _endCallbacking() internal {
         _exitPhase();
     }
@@ -475,7 +509,7 @@ abstract contract PhaseGuard {
         bool isUserAllowed = (currentPolicy & ALLOW_USER) != 0;
         bool isAdminAllowed = (currentPolicy & ALLOW_ADMIN) != 0;
 
-        // Pass if isUserAllowed = true
+        // Pass if isUserAllowed == true
         if(!isUserAllowed) {
             if (isAdminAllowed) {
                 // If only admin entry is allowed check access rights (reverts if not admin):
@@ -507,5 +541,7 @@ abstract contract PhaseGuard {
     function _withView() private view {
         if( (getPolicy(_phase) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
     }
+
+
 
 }
