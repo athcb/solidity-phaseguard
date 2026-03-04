@@ -17,6 +17,10 @@ contract AttackerReentrant {
         target.dummyView();
     }
 
+    function attackMutating() external {
+        target.dummyMutating();
+    }
+
     fallback() external payable {
         target.transitionTo(PhaseGuard.Phase.PAUSED);
     }
@@ -538,8 +542,188 @@ contract PhaseGuardTest is Test {
     }
 
     /// @dev withMutating succeeds in MAINTENANCE when called by admin
-
+    function test_withMutatingSucceedsInMaintenanceWhenCalledByAdmin() public {
+        uint256 counterBefore = phaseGuard.counter();
+        vm.startPrank(owner);
+        phaseGuard.transitionTo(MAINTENANCE);
+        phaseGuard.dummyMutating();
+        assertEq(phaseGuard.counter(), counterBefore + 1);
+        vm.stopPrank();
+    }
+    
     /// @dev calling a withMutating function mid-operation (in a callback) reverts 
+    function test_withMutatingRevertsWhenMidOperation() public {
+        AttackerReentrant attacker = new AttackerReentrant(address(phaseGuard));
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithExternalCallTo(address(attacker), abi.encodeWithSelector(AttackerReentrant.attackMutating.selector));
+    }
+
+    /// @dev test withMutating + external call (happy path)
+    function test_withMutatingWithExternalCallSucceeds() public {
+        // Assert that events for the following phase transitions are emitted:
+        // 1. READY -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        // 2. MUTATING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
+        // 3. EXTERNALIZING -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
+        // 4. MUTATING -> READY 
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        phaseGuard.mutatingWithExternalCall();
+
+        // Assert that global phase is back at READY
+        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        // Assert that phase stack depth is 1
+        assertEq(phaseGuard.phaseStackDepth(), 1);
+        // Assert that phase stack base is READY
+        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
+    }
+
+    /// @dev test withMutating + callback (happy path)
+    function test_withMutatingWithCallbackSucceeds() public {
+        // Assert that events for the following phase transitions are emitted:
+        // 1. READY -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        // 2. MUTATING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
+        // 3. EXTERNALIZING -> CALLBACK
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, CALLBACKING);
+        // 4. CALLBACK -> EXTERNALIZING 
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(CALLBACKING, EXTERNALIZING);
+        // 5. EXTERNALIZING -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
+        // 6. MUTATING -> READY 
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+
+        phaseGuard.mutatingWithCallback();
+
+        // Assert that global phase is back at READY
+        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        // Assert that phase stack depth is 1
+        assertEq(phaseGuard.phaseStackDepth(), 1);
+        // Assert that phase stack base is READY
+        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
+    }
+
+
+    /// @dev test withMutating + multiple external calls (happy path)
+    function test_withMutatingWithMultipleExternalCallsSucceeds() public {
+        // Assert that events for the following phase transitions are emitted:
+        // First external call:
+        // 1. READY -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        // 2. MUTATING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
+        // 3. EXTERNALIZING -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
+       
+        // Second external call:
+        // 4. MUTATING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
+        // 5. EXTERNALIZING -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
+        // 6. MUTATING -> READY 
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        
+        phaseGuard.mutatingWithMultipleExternalCalls();
+
+        // Assert that global phase is back at READY
+        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        // Assert that phase stack depth is 1
+        assertEq(phaseGuard.phaseStackDepth(), 1);
+        // Assert that phase stack base is READY
+        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
+    }
+
+    /// @dev test withMutating + mixed external calls (happy path)
+    function test_withMutatingWithMixedExternalCallsSucceeds() public {
+        // Assert that events for the following phase transitions are emitted:
+        // First external call:
+        // 1. READY -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        // 2. MUTATING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
+        // 3. EXTERNALIZING -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
+       
+        // Second external call with callback:
+        // 4. MUTATING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
+        // 5. EXTERNALIZING -> CALLBACKING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, CALLBACKING);
+        // 6. CALLBACKING -> EXTERNALIZING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(CALLBACKING, EXTERNALIZING);
+        // 7. EXTERNALIZING -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
+        // 8. MUTATING -> READY 
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        
+        phaseGuard.mutatingWithMixedExternalCalls();
+
+        // Assert that global phase is back at READY
+        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        // Assert that phase stack depth is 1
+        assertEq(phaseGuard.phaseStackDepth(), 1);
+        // Assert that phase stack base is READY
+        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
+    }
+
+    /// @dev test that withMutating + nested external calls reverts
+    function test_withMutatingWithNestedExternalCallsReverts() public {
+        // READY -> MUTATING -> EXTERNALIZING -> EXTERNALIZING etc.
+        // EXTERNALIZING -> EXTERNALIZING not allowed: policy should have ALLOW_WRITES to enter EXTERNALIZING
+        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
+        phaseGuard.mutatingWithNestedExternalCalls();
+    }
+
+    /// @dev test that withMutating + missing nested external call reverts
+    function test_withMutatingWithMissingNestedExternalCallsReverts() public {
+        // READY -> MUTATING -> EXTERNALIZING -> _exitPhase (pop EXTERNALIZING) -> _exitPhase (pop MUTATING): One _exitPhase is missing
+        // _checkInvariants() reverts with PhaseStabilityInvariant(): MUTATING is unstable
+        // StackLengthInvariant() would also be triggered if placed first
+        vm.expectRevert(PhaseGuard.PhaseStabilityInvariant.selector);
+        phaseGuard.missingNestedExternalCalls();
+    }
+
+    /// @dev test that withMutating + incorrect incorrect start helper pairing reverts
+    function test_withMutatingWithIncorrectStartHelperPairingReverts() public {
+        // READY -> MUTATING -> EXTERNALIZING -> _exitPhase (pop EXTERNALIZING) -> _exitPhase (pop MUTATING) -> _exitPhase (pop READY): One extra _exitPhase 
+        // _exitPhase reverts with StackSizeError(): 1 element left in stack when at least 2 are expected
+        vm.expectRevert(PhaseGuard.StackSizeError.selector);
+        phaseGuard.incorrectStartHelperPairing();
+    }
+
+     /// @dev test that withMutating + incorrect incorrect end helper pairing reverts
+    function test_withMutatingWithIncorrectEndHelperPairingReverts() public {
+        // READY -> MUTATING -> EXTERNALIZING -> CALLBACKING -> _exitPhase (pop CALLBACKING) -> _exitPhase (pop EXTERNALIZING) -> One missing _exitPhase to pop MUTATING
+        // _checkInvariants reverts with PhaseStabilityInvariant (current phase is MUTATING)
+        vm.expectRevert(PhaseGuard.PhaseStabilityInvariant.selector);
+        phaseGuard.incorrectEndHelperPairing();
+    }
 
     /// @dev test withView happy path
     function test_withViewReturnsValueOnlyWhenPhaseAllows() public {
