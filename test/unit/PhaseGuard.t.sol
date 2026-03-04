@@ -5,6 +5,23 @@ import { PhaseGuardMock } from "../mocks/PhaseGuardMock.sol";
 import { PhaseGuard } from "../../src/PhaseGuard.sol";
 import { Test, console2 } from "forge-std/Test.sol";
 
+/// @dev Helper contract that calls `transitionTo` when triggered, simulating a mid-operation reentrant admin call.
+contract AttackerReentrant {
+    PhaseGuardMock target;
+
+    constructor(address _target) {
+        target = PhaseGuardMock(_target);
+    }
+
+    function attackView() external view {
+        target.dummyView();
+    }
+
+    fallback() external payable {
+        target.transitionTo(PhaseGuard.Phase.PAUSED);
+    }
+}
+
 contract PhaseGuardTest is Test {
 
     PhaseGuardMock public phaseGuard;
@@ -412,14 +429,140 @@ contract PhaseGuardTest is Test {
     //////////////////////////////////////////////////////////////*/
     
     /// @dev `transitionTo` reverts with `AccessDenied` when called by a non-admin
+    function test_TransitionToRevertsWhenCalledByNonAdmin() public {
+        vm.prank(user);
+        vm.expectRevert(PhaseGuardMock.AccessDenied.selector);
+        phaseGuard.transitionTo(PAUSED);
+    }
 
     /// @dev `transitionTo` reverts when `_phaseStack` has a depth > 1 (mid-operation)
+    function test_TransitionToRevertsMidOperation() public {
+        // Deploy attacker that will call transitionTo(PAUSED) when called
+        AttackerReentrant attacker = new AttackerReentrant(address(phaseGuard));
+
+        // mutatingWithExternalCallTo will enter [READY, MUTATING, EXTERNALIZING] (depth 3),
+        // then call attacker, which calls transitionTo -> _checkInvariants -> revert StackLengthInvariant
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithExternalCallTo(address(attacker), "");
+    }
 
     /// @dev `transitionTo` reverts with `PhaseStabilityInvariant` when `_phase` is not stable
+    function test_TransitionToRevertsWhenTargetPhaseIsNotStable() public {
+        vm.prank(owner);
+        // MUTATING is unstable
+        vm.expectRevert(PhaseGuard.PhaseStabilityInvariant.selector);
+        phaseGuard.transitionTo(MUTATING);
+    }
 
     /// @dev `transitionTo` reverts with `TransitionGateLocked` if transition is not allowed
+    function test_TransitionToRevertsWhenTransitionNotAllowed() public {
+        vm.startPrank(owner);
+        // First transition to the FINALIZED terminal state
+        phaseGuard.transitionTo(FINALIZED);
+        vm.expectRevert(PhaseGuard.TransitionGateLocked.selector);
+        // No transitions are allowed from FINALIZED
+        phaseGuard.transitionTo(READY);
+        vm.stopPrank();
+    }
 
     /// @dev `transitionTo` correctly changes the global `_phase`, updates `_phaseStack` and emits event
+    function test_TransitionToCorrectlyUpdatesPhaseAndStack() public {
+        vm.prank(owner);
+        // Assert that phase before transition is READY
+        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        // Check that event PhaseTransition(currentPhase, toPhase) will be emitted
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, PAUSED);
+        // READY -> PAUSED allowed
+        phaseGuard.transitionTo(PAUSED);
+        // Assert that global phase after transition is PAUSED
+        assertEq(uint8(phaseGuard.phase()), uint8(PAUSED));
+        // Assert that _phaseStack contains only 1 element
+        assertEq(phaseGuard.phaseStackDepth(), 1);
+        // Assert that _phaseStack base element is equal to the global phase 
+        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(PAUSED));
+    }
 
+     /*//////////////////////////////////////////////////////////////
+                               MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev test withMutating happy path
+    function test_withMutatingUpdatesStateAndResetsPhase() public {
+        uint256 counterBefore = phaseGuard.counter();
+        PhaseGuard.Phase phaseBefore = phaseGuard.phase();
+        
+        // Assert that the global phase will transition mid-call from 
+        // 1. READY -> MUTATING and
+        // 2. MUTATING -> READY
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        phaseGuard.dummyMutating();
+        
+        // Assert that state has been updated
+        assertTrue(phaseGuard.counter() == counterBefore + 1);
+        // Assert that the global phase has been reset back to the initial phase 
+        assertTrue(phaseGuard.phase() == phaseBefore);
+    }
+
+    /// @dev test withMutating reverts with custom error PolicyGateLocked when phase does not meet entry policy requirements
+    function test_withMutatingRevertsWhenPhaseNotAllows() public {
+        // FINALIZED has no ALLOW_USER or ALLOW_ADMIN -> PolicyGateLocked
+        vm.prank(owner);
+        phaseGuard.transitionTo(FINALIZED);
+        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
+        phaseGuard.dummyMutating();
+    }
+
+    /// @dev withMutating reverts in PAUSED and MAINTENANCE state when called by non-admin
+    function test_withMutatingRevertsInPausedOrMaintenanceWhenCalledByNonAdmin() public {
+        vm.prank(owner);
+        phaseGuard.transitionTo(PAUSED);
+
+        // Non-owners not allowed to call withMutating functions when in PAUSED
+        // PAUSED has ALLOW_ADMIN so call fails in _checkAdmin with  AccessDenied before PolicyGateLocked is reached
+        vm.prank(user);
+        vm.expectRevert(PhaseGuardMock.AccessDenied.selector);
+        phaseGuard.dummyMutating();
+
+        phaseGuard.transitionTo(READY);
+        phaseGuard.transitionTo(MAINTENANCE);
+        vm.stopPrank();
+
+        // Non-owners not allowed to call withMutating functions when in MAINTENANCE
+        vm.prank(user);
+        vm.expectRevert(PhaseGuardMock.AccessDenied.selector);
+        phaseGuard.dummyMutating();
+    }
+
+    /// @dev withMutating succeeds in MAINTENANCE when called by admin
+
+    /// @dev calling a withMutating function mid-operation (in a callback) reverts 
+
+    /// @dev test withView happy path
+    function test_withViewReturnsValueOnlyWhenPhaseAllows() public {
+        assertEq(phaseGuard.dummyView(), phaseGuard.counter(),  "READY should allow views");
+
+        vm.startPrank(owner);
+        phaseGuard.transitionTo(MAINTENANCE);
+        assertEq(phaseGuard.dummyView(), phaseGuard.counter(), "MAINTENACE should allow views to admin");
+
+        // reset global phase to READY
+        phaseGuard.transitionTo(READY);
+        phaseGuard.transitionTo(FINALIZED);
+        vm.stopPrank();
+        assertEq(phaseGuard.dummyView(), phaseGuard.counter(), "FINALIZED should allow views");
+    }
+
+    /// @dev test withView locked phases (custom error ViewsLocked)
+    function test_withViewRevertsWhenPhaseLocksViews() public {
+        // use external contract to simulate a call to dummyView mid-operation 
+        AttackerReentrant attacker = new AttackerReentrant(address(phaseGuard));
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithExternalCallTo(address(attacker), abi.encodeWithSelector(AttackerReentrant.attackView.selector));
+
+    }
 
 }
