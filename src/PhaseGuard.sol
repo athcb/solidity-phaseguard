@@ -133,6 +133,7 @@ abstract contract PhaseGuard {
         }
 
         _phase = Phase.READY;
+        // Unreachable error under normal circumstances but added for defense-in-depth:
         if(_phaseStack.length != 0) revert StackSizeError();
         _phaseStack.push(_phase);
         emit PhaseTransition(Phase.UNINITIALIZED, Phase.READY);
@@ -326,7 +327,8 @@ abstract contract PhaseGuard {
             return ALLOW_ADMIN | ALLOW_EXTERNAL | ALLOW_VALUE | ALLOW_WRITES | ALLOW_VIEWS | ALLOW_CALLBACKS | ALLOW_DELEGATECALL;
         }
 
-        // else block all entry-points
+        // Unreachable on Solidity ≥0.8.0 (enum bounds are validated at runtime).
+        // Kept as defense-in-depth: blocks all entry-points for any unexpected value.
         return 0;
     }
     
@@ -397,9 +399,9 @@ abstract contract PhaseGuard {
     /// @dev Must be paired with `_startExternalizingWithCallback()`.
     function _endExternalizingWithCallback() internal {
         // 1. Exit CALLBACKING
-        _exitPhase();
+        _endCallbacking();
         // 2. Exit EXTERNALIZING
-        _exitPhase();
+        _endExternalizing();
     }
 
     /// @notice Manually enters the `CALLBACKING` phase to handle expected reentrant hooks (e.g., `onERC721Received`).
@@ -415,6 +417,8 @@ abstract contract PhaseGuard {
 
     /// @notice Unwinds the `CALLBACKING` phase.
     /// @dev Must be paired with `_startCallbacking()`.
+    /// Both `_endCallbacking` and `_endExternalizing` delegate to `_exitPhase` but are kept
+    /// as separate functions to mirror their `_start*` counterparts and show intent.
     function _endCallbacking() internal {
         _exitPhase();
     }
@@ -441,7 +445,9 @@ abstract contract PhaseGuard {
             revert PolicyGateLocked();
         }
 
-        // Transition Gate: Check if transition is allowed in the transition matrix 
+        // Transition Gate: Check if transition is allowed in the transition matrix.
+        // Unreachable under normal execution as the policy gate above is strict enough 
+        // to catch all invalid paths. Kept as defense-in-depth in case policies are overridden.
         bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
         if(!isAllowed) revert TransitionGateLocked();
         
@@ -461,7 +467,9 @@ abstract contract PhaseGuard {
         uint256 stackSize = _phaseStack.length;
         if(stackSize < 2) revert StackSizeError();
 
-        // Phase at top of the stack should be the same as global phase.
+        // Phase at top of the stack should be the same as global phase:
+        // Unreachable under normal execution (`_phase` is always kept in sync with the stack top)
+        // but kept as defense-in-depth as it guards against raw storage corruption.
         Phase fromPhase = _phaseStack[stackSize - 1];
         if(fromPhase != _phase) revert StackInconsistencyError();
 
@@ -487,6 +495,9 @@ abstract contract PhaseGuard {
     function _checkInvariants() private view {
         Phase currentPhase = _phase;
         if(!isStable(currentPhase)) revert PhaseStabilityInvariant();
+        // The following two checks are defense-in-depth: under correct usage the
+        // stability check above will catch misuse first, because unstable phases
+        // are always pushed/popped together with the stack.
         if(_phaseStack.length != 1) revert StackLengthInvariant();
         if(currentPhase != _phaseStack[0]) revert StackStateInvariant();
     }
