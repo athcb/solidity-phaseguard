@@ -42,7 +42,7 @@ contract PhaseGuardTest is Test {
     PhaseGuard.Phase constant FINALIZED = PhaseGuard.Phase.FINALIZED;
     PhaseGuard.Phase constant PAUSED = PhaseGuard.Phase.PAUSED;
     PhaseGuard.Phase constant MAINTENANCE = PhaseGuard.Phase.MAINTENANCE;
-
+    
     // Phase array
     PhaseGuard.Phase[8] public phaseArray = [UNINITIALIZED, READY, MUTATING, EXTERNALIZING, CALLBACKING, FINALIZED, PAUSED, MAINTENANCE];
 
@@ -253,7 +253,7 @@ contract PhaseGuardTest is Test {
         }
     }
 
-    // 7. `MAINTENANCE` transitions
+    // 8. `MAINTENANCE` transitions
     function test_MaintenanceTransitions() public view {
         bool[8] memory allowedTo = [
             false, // UNINITIALIZED
@@ -746,7 +746,24 @@ contract PhaseGuardTest is Test {
         AttackerReentrant attacker = new AttackerReentrant(address(phaseGuard));
         vm.expectRevert("external call failed");
         phaseGuard.mutatingWithExternalCallTo(address(attacker), abi.encodeWithSelector(AttackerReentrant.attackView.selector));
+    }
 
+    /*//////////////////////////////////////////////////////////////
+                  SCOPED HELPERS WITHOUT WITHMUTATING
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Trying to enter EXTERNALIZING from READY reverts with PolicyGateLocked
+    /// READY does not have ALLOW_WRITES so the policy gate blocks entry before the transition gate is reached.
+    function test_ExternalizingFromReadyReverts() public {
+        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
+        phaseGuard.externalizingFromReady();
+    }
+
+    /// @dev Trying to enter CALLBACKING from READY reverts with PolicyGateLocked
+    /// READY does not have ALLOW_EXTERNAL so the policy gate blocks entry before the transition gate is reached.
+    function test_CallbackingFromReadyReverts() public {
+        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
+        phaseGuard.callbackingFromReady();
     }
 
 }
