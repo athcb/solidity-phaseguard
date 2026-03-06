@@ -6,4 +6,7 @@ solc = "0.8.30"
 
 remappings = ["@openzeppelin/=lib/openzeppelin-contracts/contracts/"]
 
+# Exclude test mocks, helpers, and libraries from coverage reports.
+no_match_coverage = "^(test|script|lib)/"
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

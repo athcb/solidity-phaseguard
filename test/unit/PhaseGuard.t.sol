@@ -3,9 +3,12 @@ pragma solidity 0.8.30;
 
 import { PhaseGuardMock } from "../mocks/PhaseGuardMock.sol";
 import { PhaseGuard } from "../../src/PhaseGuard.sol";
+import { ERC721Receiver, ERC1155Receiver, ERC777Receiver, FlashLoanBorrower, MaliciousCallbackReceiver } from "../mocks/CallbackReceivers.sol";
 import { Test, console2 } from "forge-std/Test.sol";
 
-/// @dev Helper contract that calls `transitionTo` when triggered, simulating a mid-operation reentrant admin call.
+/// @dev Helper contract that calls either `transitionTo` when triggered 
+// or the dummy functions `dummyView`, `dummyMutating` in the mock contract implementing PhaseGuard, 
+// simulating a mid-operation reentrant admin call.
 contract AttackerReentrant {
     PhaseGuardMock target;
 
@@ -746,6 +749,160 @@ contract PhaseGuardTest is Test {
         AttackerReentrant attacker = new AttackerReentrant(address(phaseGuard));
         vm.expectRevert("external call failed");
         phaseGuard.mutatingWithExternalCallTo(address(attacker), abi.encodeWithSelector(AttackerReentrant.attackView.selector));
+    }
+
+    /// @dev mutatingWithExternalCallTo succeeds when the target call succeeds (happy path).
+    /// READY -> MUTATING -> EXTERNALIZING -> (target succeeds) -> MUTATING -> READY
+    function test_withMutatingExternalCallToSucceeds() public {
+        ERC721Receiver receiver = new ERC721Receiver();
+
+        phaseGuard.mutatingWithExternalCallTo(
+            address(receiver),
+            abi.encodeWithSelector(
+                ERC721Receiver.onERC721Received.selector,
+                address(phaseGuard),
+                address(this),
+                1,
+                ""
+            )
+        );
+
+        assertTrue(receiver.called(), "Receiver should have been called");
+        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    CALLBACKING: LEGITIMATE CALLBACKS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev ERC721 `onERC721Received`: receiver returns selector during CALLBACKING (happy path)
+    function test_CallbackERC721ReceiverSucceeds() public {
+        ERC721Receiver receiver = new ERC721Receiver();
+
+        // mutatingWithCallbackTo enters CALLBACKING and calls the receiver
+        phaseGuard.mutatingWithCallbackTo(
+            address(receiver),
+            abi.encodeWithSelector(
+                ERC721Receiver.onERC721Received.selector,
+                address(phaseGuard), // operator
+                address(this),       // from
+                1,                   // tokenId
+                ""                   // data
+            )
+        );
+
+        assertTrue(receiver.called(), "ERC721 receiver should have been called");
+        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+    }
+
+    /// @dev ERC1155 `onERC1155Received`: receiver returns selector during CALLBACKING (happy path)
+    function test_CallbackERC1155ReceiverSucceeds() public {
+        ERC1155Receiver receiver = new ERC1155Receiver();
+
+        phaseGuard.mutatingWithCallbackTo(
+            address(receiver),
+            abi.encodeWithSelector(
+                ERC1155Receiver.onERC1155Received.selector,
+                address(phaseGuard), // operator
+                address(this),       // from
+                1,                   // id
+                100,                 // value
+                ""                   // data
+            )
+        );
+
+        assertTrue(receiver.called(), "ERC1155 receiver should have been called");
+        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+    }
+
+    /// @dev ERC777 `tokensReceived`: receiver acknowledges receipt during CALLBACKING (happy path)
+    function test_CallbackERC777ReceiverSucceeds() public {
+        ERC777Receiver receiver = new ERC777Receiver();
+
+        phaseGuard.mutatingWithCallbackTo(
+            address(receiver),
+            abi.encodeWithSelector(
+                ERC777Receiver.tokensReceived.selector,
+                address(phaseGuard), // operator
+                address(this),       // from
+                address(receiver),   // to
+                100,                 // amount
+                "",                  // userData
+                ""                   // operatorData
+            )
+        );
+
+        assertTrue(receiver.called(), "ERC777 receiver should have been called");
+        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+    }
+
+    /// @dev Flash loan borrower executes arbitrage on a separate contract during CALLBACKING (happy path)
+    function test_CallbackFlashLoanBorrowerSucceeds() public {
+        FlashLoanBorrower borrower = new FlashLoanBorrower();
+
+        // The borrower's arb target is a separate contract (not the phaseGuard).
+        // We use a simple counter contract as the arb target.
+        PhaseGuardMock arbTarget = new PhaseGuardMock();
+        borrower.setArbCall(
+            address(arbTarget),
+            abi.encodeWithSelector(PhaseGuardMock.dummyMutating.selector)
+        );
+
+        phaseGuard.mutatingWithCallbackTo(
+            address(borrower),
+            abi.encodeWithSelector(
+                FlashLoanBorrower.onFlashLoan.selector,
+                address(this),       // initiator
+                address(0),          // token
+                1000,                // amount
+                0,                   // fee
+                ""                   // data
+            )
+        );
+
+        assertTrue(borrower.called(), "Flash loan borrower should have been called");
+        assertEq(arbTarget.counter(), 1, "Arb target should have been mutated");
+        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+            CALLBACKING: MALICIOUS CALLBACKS (RE-ENTRY BLOCKED)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Malicious callback attempts to call a withView function during CALLBACKING → reverts
+    function test_CallbackReentrantViewReverts() public {
+        MaliciousCallbackReceiver malicious = new MaliciousCallbackReceiver(address(phaseGuard));
+        malicious.setAttackType(MaliciousCallbackReceiver.AttackType.VIEW);
+
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithCallbackTo(
+            address(malicious),
+            abi.encodeWithSelector(
+                MaliciousCallbackReceiver.onERC721Received.selector,
+                address(phaseGuard),
+                address(this),
+                1,
+                ""
+            )
+        );
+    }
+
+    /// @dev Malicious callback attempts to call a withMutating function during CALLBACKING → reverts
+    function test_CallbackReentrantMutatingReverts() public {
+        MaliciousCallbackReceiver malicious = new MaliciousCallbackReceiver(address(phaseGuard));
+        malicious.setAttackType(MaliciousCallbackReceiver.AttackType.MUTATING);
+
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithCallbackTo(
+            address(malicious),
+            abi.encodeWithSelector(
+                MaliciousCallbackReceiver.onERC721Received.selector,
+                address(phaseGuard),
+                address(this),
+                1,
+                ""
+            )
+        );
     }
 
     /*//////////////////////////////////////////////////////////////

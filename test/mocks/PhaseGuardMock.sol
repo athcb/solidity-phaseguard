@@ -78,8 +78,6 @@ contract PhaseGuardMock is PhaseGuard {
     function mutatingWithNestedExternalCalls() external withMutating {
         _startExternalizing();
         _startExternalizing(); 
-        _endExternalizing();
-        _endExternalizing();
     }
 
     /// @dev Should revert: missing state unwinding via `_endExternalizing`
