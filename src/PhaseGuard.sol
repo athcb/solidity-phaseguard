@@ -30,18 +30,25 @@ abstract contract PhaseGuard {
         PAUSED, // 6: Temporary locked state, stable
         MAINTENANCE // 7: Admin-only maintenance/upgrade window, stable
     }
-    
+
     /*//////////////////////////////////////////////////////////////
-                            STATE VARIABLES
+                    ERC-7201 NAMESPACED STORAGE
     //////////////////////////////////////////////////////////////*/
-    
-    /// @dev Global contract phase.
-    Phase internal _phase;
-    
-    /// @dev Stack of phases tracked during each function call. Used to unwind nested transitions.
-    /// First element is always the resting stable phase.
-    /// E.g.,  1. [READY] 2. [READY, MUTATING] 3. [READY, MUTATING, EXTERNALIZING] 4. [READY, MUTATING] 5. [READY]
-    Phase[] internal _phaseStack;
+
+    /// @dev PhaseGuard storage laid out in an ERC-7201 namespace to eliminate
+    /// storage-slot collisions when used behind upgradeable proxies.
+    /// @custom:storage-location erc7201:phaseguard.storage.PhaseGuard
+    struct PhaseGuardStorage {
+        /// @dev Global contract phase.
+        Phase _phase;
+        /// @dev Stack of phases tracked during each function call. Used to unwind nested transitions.
+        /// First element is always the resting stable phase.
+        /// E.g.,  1. [READY] 2. [READY, MUTATING] 3. [READY, MUTATING, EXTERNALIZING] 4. [READY, MUTATING] 5. [READY]
+        Phase[] _phaseStack;
+    }
+
+    // keccak256(abi.encode(uint256(keccak256("phaseguard.storage.PhaseGuard")) - 1)) & ~bytes32(uint256(0xff))
+    bytes32 private constant PHASEGUARD_STORAGE = 0x1b9524599e3b924a74c6b86d062db59fe7ffb1495cb93298113271b051cd8600;
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS / BIT FLAGS
@@ -119,6 +126,10 @@ abstract contract PhaseGuard {
     ///
     /// Example when using OZ UUPS proxy:
     /// ```solidity
+    /// constructor() {
+    ///     _disableInitializers(); // disable initializers in the implementation
+    /// }
+    /// 
     /// function initialize() external initializer {
     ///     __Ownable_init(msg.sender);
     ///     _phaseGuardInit();
@@ -128,14 +139,15 @@ abstract contract PhaseGuard {
     /// @custom:error `TransitionGateLocked()` if the current phase is not `UNINITIALIZED`: initialization can only occur once.
     /// @custom:error `StackSizeError()` if the `_phaseStack` is not empty.
     function _phaseGuardInit() internal {
-        if(_phase != Phase.UNINITIALIZED) {
+        PhaseGuardStorage storage $ = _getStorage();
+        if($._phase != Phase.UNINITIALIZED) {
             revert TransitionGateLocked();
         }
 
-        _phase = Phase.READY;
+        $._phase = Phase.READY;
         // Unreachable error under normal circumstances but added for defense-in-depth:
-        if(_phaseStack.length != 0) revert StackSizeError();
-        _phaseStack.push(_phase);
+        if($._phaseStack.length != 0) revert StackSizeError();
+        $._phaseStack.push($._phase);
         emit PhaseTransition(Phase.UNINITIALIZED, Phase.READY);
     }
 
@@ -179,7 +191,8 @@ abstract contract PhaseGuard {
         _checkAdmin();
         _checkInvariants();
 
-        Phase currentPhase = _phase;
+        PhaseGuardStorage storage $ = _getStorage();
+        Phase currentPhase = $._phase;
 
         // Fail early: avoids wasting gas on SSTOREs that would be reverted by _checkInvariants().
         if(!isStable(toPhase)) revert PhaseStabilityInvariant();
@@ -189,8 +202,8 @@ abstract contract PhaseGuard {
         if(!isAllowed) revert TransitionGateLocked();
         
         // State update
-        _phase = toPhase;
-        _phaseStack[0] = toPhase;
+        $._phase = toPhase;
+        $._phaseStack[0] = toPhase;
         emit PhaseTransition(currentPhase, toPhase);
 
         _checkInvariants();
@@ -203,7 +216,7 @@ abstract contract PhaseGuard {
     /// @notice Returns the current global phase of the contract.
     /// @return The current `Phase` enum value.
     function phase() public view returns (Phase) {
-        return _phase;
+        return _getStorage()._phase;
     }
 
     /// @notice Returns the current depth of the phase stack.
@@ -211,14 +224,14 @@ abstract contract PhaseGuard {
     /// A depth greater than 1 indicates the contract is mid-operation.
     /// @return The number of entries in `_phaseStack`.
     function phaseStackDepth() public view returns (uint256) {
-        return _phaseStack.length;
+        return _getStorage()._phaseStack.length;
     }
 
     /// @notice Returns the base (resting) phase at the bottom of the stack.
     /// @dev At rest, this should always equal `phase()`.
     /// @return The first element of `_phaseStack`.
     function phaseStackBase() public view returns (Phase) {
-        return _phaseStack[0];
+        return _getStorage()._phaseStack[0];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -437,7 +450,8 @@ abstract contract PhaseGuard {
     /// @custom:error `PolicyGateLocked()` if the current phase's policy does not contain the required bitmask of permissions.
     /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
     function _enterPhase(Phase toPhase, uint8 requiredEntryPolicy) private {
-        Phase currentPhase = _phase;
+        PhaseGuardStorage storage $ = _getStorage();
+        Phase currentPhase = $._phase;
 
         // Policy Gate: Check current policy against required permissions 
         uint8 currentPolicy = getPolicy(currentPhase);
@@ -452,8 +466,8 @@ abstract contract PhaseGuard {
         if(!isAllowed) revert TransitionGateLocked();
         
         // State update
-        _phase = toPhase;
-        _phaseStack.push(toPhase);
+        $._phase = toPhase;
+        $._phaseStack.push(toPhase);
         emit PhaseTransition(currentPhase, toPhase);
     }
 
@@ -463,24 +477,26 @@ abstract contract PhaseGuard {
     /// @custom:error `StackSizeError()` if operation attempts to pop the base state.
     /// @custom:error `StackInconsistencyError()` if global `_phase` desynchronized from the stack.
     function _exitPhase() private {
+        PhaseGuardStorage storage $ = _getStorage();
+
         // Stack size check: stack should contain at least the current and previous phases for _exitPhase to work. 
-        uint256 stackSize = _phaseStack.length;
+        uint256 stackSize = $._phaseStack.length;
         if(stackSize < 2) revert StackSizeError();
 
         // Phase at top of the stack should be the same as global phase:
         // Unreachable under normal execution (`_phase` is always kept in sync with the stack top)
         // but kept as defense-in-depth as it guards against raw storage corruption.
-        Phase fromPhase = _phaseStack[stackSize - 1];
-        if(fromPhase != _phase) revert StackInconsistencyError();
+        Phase fromPhase = $._phaseStack[stackSize - 1];
+        if(fromPhase != $._phase) revert StackInconsistencyError();
 
         // Get previous phase from stack.
-        Phase toPhase = _phaseStack[stackSize - 2];
+        Phase toPhase = $._phaseStack[stackSize - 2];
 
         // Pop the current phase.
-        _phaseStack.pop();
+        $._phaseStack.pop();
 
         // Restore the previous phase.
-        _phase = toPhase;
+        $._phase = toPhase;
         emit PhaseTransition(fromPhase, toPhase);
     }
 
@@ -493,13 +509,14 @@ abstract contract PhaseGuard {
     /// @custom:error `StackLengthInvariant()` if the stack was not unwound correctly.
     /// @custom:error `StackStateInvariant()` if global phase desynchronized from the base stack.
     function _checkInvariants() private view {
-        Phase currentPhase = _phase;
+        PhaseGuardStorage storage $ = _getStorage();
+        Phase currentPhase = $._phase;
         if(!isStable(currentPhase)) revert PhaseStabilityInvariant();
         // The following two checks are defense-in-depth: under correct usage the
         // stability check above will catch misuse first, because unstable phases
         // are always pushed/popped together with the stack.
-        if(_phaseStack.length != 1) revert StackLengthInvariant();
-        if(currentPhase != _phaseStack[0]) revert StackStateInvariant();
+        if($._phaseStack.length != 1) revert StackLengthInvariant();
+        if(currentPhase != $._phaseStack[0]) revert StackStateInvariant();
     }
 
     /// @notice Pre-execution guard logic for the Mutating modifier.
@@ -513,7 +530,7 @@ abstract contract PhaseGuard {
     function _withMutatingBefore() private {
         _checkInvariants();
         
-        Phase currentPhase = _phase;
+        Phase currentPhase = _getStorage()._phase;
         uint8 currentPolicy = getPolicy(currentPhase);
 
         // Check access rights:
@@ -550,10 +567,15 @@ abstract contract PhaseGuard {
 
     /// @dev Internal helper for `withView`. Wraps logic to reduce bytecode size.
     function _withView() private view {
-        if( (getPolicy(_phase) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
+        if( (getPolicy(_getStorage()._phase) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
     }
 
-   
-
+    /// @dev Returns a pointer to the ERC-7201 namespaced storage struct.
+    function _getStorage() private pure returns (PhaseGuardStorage storage $) {
+        bytes32 slot = PHASEGUARD_STORAGE;
+        assembly {
+            $.slot := slot
+        }
+    }
 
 }
