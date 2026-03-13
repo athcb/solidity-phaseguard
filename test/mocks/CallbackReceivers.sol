@@ -64,7 +64,7 @@ contract FlashLoanBorrower {
 }
 
 /// @dev Malicious receiver that attempts to re-enter the PhaseGuard contract during a callback.
-/// Used to prove that views and mutating calls are blocked during CALLBACKING.
+/// Used to prove that views and mutating calls are blocked during MUTATING.
 contract MaliciousCallbackReceiver {
     PhaseGuardMock public target;
     enum AttackType { VIEW, MUTATING }

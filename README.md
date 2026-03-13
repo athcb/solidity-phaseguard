@@ -2,7 +2,7 @@
 # PhaseGuard
 *Note: PhaseGuard is still in development and not ready for use*
 
-PhaseGuard is a lifecycle layer that routes every call through a shared phase machine, so initialization, mutation, externalization, and finalization follow one enforced order. Policies on each phase encode today’s best practices (init process, CEI, pause/upgrade invariants, and other phase-specific policies) in one guard, replacing scattered modifiers and making lifecycle mistakes structurally impossible.
+PhaseGuard is a lifecycle guard that routes every call through a shared phase machine, so initialization, mutation, and finalization follow one enforced order. Policies on each phase encode today's best practices (init sequencing, CEI compliance, pause/upgrade invariants) in a single guard, replacing scattered modifiers and making lifecycle mistakes structurally impossible.
 
 ## Architecture
 
@@ -10,81 +10,62 @@ PhaseGuard is a lifecycle layer that routes every call through a shared phase ma
 
 | ID | Phase          | Type      | Summary                                                                                  |
 |----|----------------|-----------|------------------------------------------------------------------------------------------|
-| 0  | Uninitialized  | Unstable  | Not initialized (initializer/init step pending): must be initialized in the same tx as deployment. |
-| 1  | Ready          | Stable    | Initialized, stable: user/admin entrypoints and reads allowed.                           |
-| 2  | Mutating       | Unstable  | Write phase: storage updates allowed, outbound calls/value blocked.                      |
-| 3  | Externalizing  | Unstable  | Outbound-call phase: external calls/value allowed per policy, storage writes blocked.    |
-| 4  | Callbacking    | Unstable  | Transient hook window: inbound callbacks allowed, writes/external calls disabled.        |
-| 5  | Finalized      | Stable    | Terminal locked state: no transitions, writes, or calls.                                 |
-| 6  | Paused         | Stable    | Temporary locked state: normal entrypoints blocked until admin moves to Ready/Finalized; reads per policy. |
-| 7  | Maintenance    | Stable    | Admin-only maintenance/upgrade window: user entrypoints stay blocked while delegatecall/external automation runs under stricter policy bits. |
+| 0  | Uninitialized  | Unstable  | Not initialized yet: must transition to READY in the same tx as deployment.             |
+| 1  | Ready          | Stable    | Normal operating state: user entry, admin entry, and views are all allowed.             |
+| 2  | Mutating       | Unstable  | Active write phase: all re-entry is blocked until execution unwinds back to a stable phase. |
+| 3  | Finalized      | Stable    | Terminal locked state: no further transitions, views only.                              |
+| 4  | Paused         | Stable    | Emergency stop: user entry is blocked while admin can still manage phase transitions.   |
+| 5  | Maintenance    | Stable    | Admin-only operating window: user entry stays blocked while admin actions remain available. |
 
 ## Phase Transition Matrix
 
-Allowed transitions:
+Allowed forward transitions:
 
-| From / To        | UNINITIALIZED | READY | MUTATING | CALLBACKING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
-|------------------|---------------|-------|----------|-------------|---------------|-----------|--------|-------------|
-| UNINITIALIZED    |      -        |  YES  |   NO     |     NO      |     NO        |   NO      |  NO    |     NO      |
-| READY            |     NO        |   -   |   YES    |     NO      |     NO        |   YES     |  YES   |     YES     |
-| MUTATING         |     NO        |  YES⌃ |    -     |     NO      |     YES       |   NO      |  NO    |     YES⌃    |
-| CALLBACKING      |     NO        |  NO   |   NO     |      -      |     YES⌃      |   NO      |  NO    |     NO      |
-| EXTERNALIZING    |     NO        |  NO   |   YES⌃   |     YES     |      -        |   NO      |  NO    |     NO      |
-| FINALIZED        |     NO        |  NO   |   NO     |     NO      |     NO        |   -       |  NO    |     NO      |
-| PAUSED           |     NO        |  YES  |   NO     |     NO      |     NO        |   YES     |  -     |     YES     |
-| MAINTENANCE      |     NO        |  YES  |   YES    |     NO      |     NO        |   NO      |  NO    |      -      |
+| From / To        | UNINITIALIZED | READY | MUTATING | FINALIZED | PAUSED | MAINTENANCE |
+|------------------|---------------|-------|----------|-----------|--------|-------------|
+| UNINITIALIZED    |      -        |  YES  |   NO     |   NO      |  NO    |     NO      |
+| READY            |     NO        |   -   |   YES    |   YES     |  YES   |     YES     |
+| MUTATING         |     NO        |  NO   |    -     |   NO      |  NO    |     NO      |
+| FINALIZED        |     NO        |  NO   |   NO     |   -       |  NO    |     NO      |
+| PAUSED           |     NO        |  YES  |   NO     |   YES     |  -     |     YES     |
+| MAINTENANCE      |     NO        |  YES  |   YES    |   NO      |  NO    |      -      |
 
-⌃Allowed only during unwinding back to the stable phase
+`MUTATING` has no forward transitions. It is entered by `withMutating` and unwound by popping the phase stack.
 
 **Stable phases:**
-- READY, FINALIZED, PAUSED, MAINTENANCE: contract **must** return to either of those after functions finish executing.
+- READY, FINALIZED, PAUSED, MAINTENANCE: the contract **must** end every call in one of these phases.
 
 **Unstable phases:**
-- UNINITIALIZED: contract is not allowed to remain uninitialized (atomic initialization). It **must** transition from UNINITIALIZED -> READY in the same tx originating from the deployer. If the transition to READY is not complete, the proxy becomes **bricked** as noone else is allowed to initialiaze it afterwards.
-- MUTATING, CALLBACKING, EXTERNALIZING: contract is allowed to be in unstable phases mid-function but **must** return to a stable phase when the call ends.
-- contract **must** return to the most recent stable phase captured on entry (eg., READY -> MUTATING -> CALLBACKING -> MUTATING -> READY).
-
-**Note on `READY` -> `EXTERNALIZING`** 
-- This transition is strictly forbidden to enforce safety. All functions performing external calls must first enter `MUTATING` to lock user entry (`ALLOW_USER = 0`), creating a mandatory mutex before any interaction occurs.
-
-**Note on `CALLBACKING`** 
-- This phase is only accessible from `EXTERNALIZING`. You cannot enter `CALLBACKING` directly from `MUTATING` because a callback implies a preceding external call.
+- UNINITIALIZED: atomic bootstrap state. It **must** transition from UNINITIALIZED to READY in the same transaction as deployment. If that does not happen, the contract becomes **bricked**.
+- MUTATING: temporary write state. The contract may pass through it mid-function, but it **must** unwind back to the stable phase captured on entry (for example, READY -> MUTATING -> READY).
 
 
-## Configuration 
+## Configuration
 
 ### Bit Flags
 
-| Bit Flag           | Direction | Purpose                                                     |
-|--------------------|-----------|-------------------------------------------------------------|
-| ALLOW_USER         | Inbound   | Allow non-admin callers to enter state-changing functions   |
-| ALLOW_ADMIN        | Inbound   | Allow admin (owner/role) to enter protected functions       |
-| ALLOW_EXTERNAL     | Outbound  | Allow contract to make calls to other contracts             |
-| ALLOW_VALUE        | Outbound  | Allow contract to send ETH/Value                            |
-| ALLOW_WRITES       | Internal  | Allow modification of state (SSTORE)                        |
-| ALLOW_VIEWS        | Inbound   | Allow reading of state (View/Pure functions)                |
-| ALLOW_CALLBACKS    | Inbound   | Allow re-entry during an active external call               |
-| ALLOW_DELEGATECALL | Internal  | Allow delegatecall operations                               |
+| Bit Flag    | Direction | Purpose                                                   |
+|-------------|-----------|-----------------------------------------------------------|
+| ALLOW_USER  | Inbound   | Allow non-admin callers to enter state-changing functions |
+| ALLOW_ADMIN | Inbound   | Allow admin callers to enter state-changing functions     |
+| ALLOW_VIEWS | Inbound   | Allow access to view functions                            |
+
+Bits 3-7 are reserved for future use.
 
 
-## Default Policy Matrix 
+## Default Policy Matrix
 
-The values below are just defaults - they can be adjusted on a usecase basis.
+The values below are the defaults built into `getPolicy()`. They can be overridden per use case.
 
-| Bit Flag / Phase | UNINITIALIZED | READY | MUTATING | CALLBACKING | EXTERNALIZING | FINALIZED | PAUSED | MAINTENANCE |
-|------------------|---------------|-------|----------|-------------|---------------|-----------|--------|-------------|
-| ALLOW_USER       |      NO       |  YES  |   NO     |    NO       |    NO         |   NO      |  NO    |     NO      |
-| ALLOW_ADMIN      |      NO       |  YES  |   NO     |    NO       |    NO         |   NO      |  YES   |     YES     |
-| ALLOW_EXTERNAL   |      NO       |  NO   |   NO     |    NO       |    YES        |   NO      |  NO    |     YES     |
-| ALLOW_VALUE      |      NO       |  NO   |   NO     |    NO       |    YES        |   NO      |  NO    |     YES     |
-| ALLOW_WRITES     |      NO       |  NO   |   YES    |    NO       |    NO         |   NO      |  NO    |     YES     |
-| ALLOW_VIEWS      |      NO       |  YES  |   NO     |    NO       |    NO         |   YES     |  YES   |     YES     |
-| ALLOW_CALLBACKS  |      NO       |       |   NO     |    YES      |    NO         |   NO      |  NO    |     YES     |
-| ALLOW_DELEGATECALL|    NO        |  NO   |   NO     |    NO       |    NO         |   NO      |  NO    |     YES     |
+| Bit Flag / Phase | UNINITIALIZED | READY | MUTATING | FINALIZED | PAUSED | MAINTENANCE |
+|------------------|---------------|-------|----------|-----------|--------|-------------|
+| ALLOW_USER       |      NO       |  YES  |   NO     |   NO      |  NO    |     NO      |
+| ALLOW_ADMIN      |      NO       |  YES  |   NO     |   NO      |  YES   |     YES     |
+| ALLOW_VIEWS      |      NO       |  YES  |   NO     |   YES     |  YES   |     YES     |
 
-- Maintenance is the only phase that simultaneously enables `ALLOW_WRITES`, `ALLOW_EXTERNAL`, and `ALLOW_DELEGATECALL` while keeping `ALLOW_USER` off. Transitions are limited to operator-controlled states (READY, PAUSED, or MUTATING) so a runbook can finish a write cycle, tranistion into Maintenance, run privileged automation, then return to READY or go into EXTERNALIZING for outbound calls without exposing that power to end users.
-
-- The initializer runs with an authorized bootstrap call: deploy -> UNINITIALIZED (all bits off) -> init via `_phaseGuardInit()` -> tranistions contract into READY.
+- `MUTATING` has all bits off. That is the core lock: no user entry, no admin entry, and no view access while state is mid-update.
+- `MAINTENANCE` keeps `ALLOW_USER` off while leaving `ALLOW_ADMIN` and `ALLOW_VIEWS` on, so operators can manage the contract without reopening end-user entry points.
+- Initialization is atomic: deploy -> UNINITIALIZED -> `_phaseGuardInit()` -> READY.
 
 ## Solved Vulnerabilities (Exploits)
 
@@ -232,7 +213,7 @@ contract VaultV2 is Initializable, UUPSUpgradeable {
 
 Attack Path: 
 1. Admin upgrades proxy from V1 to V2 manually (no OZ plugin check).
-2. newConfig is stored at slot 0, overwriting Initializable’s `_initialized` bit.
+2. newConfig is stored at slot 0, overwriting Initializable's `_initialized` bit.
 3. `_initialized` reverts to 0. Proxy now thinks it was never initialized.
 4. Attacker calls initialize(attacker, …) on the proxy.
 5. Attacker becomes admin, can drain or upgrade again.
@@ -414,7 +395,7 @@ contract AuctionLauncher {
         treasury = msg.sender; // project expects its own wallet set here
 
         // Vulnerability: user controls initData and can point templateId to a malicious impl
-        // The delegatecall executes inside AuctionLauncher’s storage context.
+        // The delegatecall executes inside AuctionLauncher's storage context.
         (bool ok, ) = templateImpl[templateId].delegatecall(
             abi.encodeWithSignature("initAuction(bytes)", initData)
         );
@@ -438,9 +419,9 @@ contract EvilTemplate {
 }
 ```
 Attack path: 
-1. Attacker socially engineered the MISO team to register their “whitelisted” template address.
-2. During launch(), the factory executed delegatecall into the template’s initAuction.
-3. The malicious template rewrote treasury to the attacker’s address inside the factory contract.
+1. Attacker socially engineered the MISO team to register their "whitelisted" template address.
+2. During launch(), the factory executed delegatecall into the template's initAuction.
+3. The malicious template rewrote treasury to the attacker's address inside the factory contract.
 4. After the auction raised funds, the attacker called withdrawProceeds() and drained the entire sale (approx $3M USDC/ETH).
 
 **Example B: Furucombo cached handler (2021) type hack**
@@ -466,7 +447,7 @@ contract ComboProxy {
     }
 }
 
-// Attacker registers a handler that reuses user approvals inside the proxy’s storage.
+// Attacker registers a handler that reuses user approvals inside the proxy's storage.
 contract EvilHandler {
     IERC20 public token;
 
@@ -484,9 +465,9 @@ contract EvilHandler {
 Attack path:
 1. Attacker deploys `EvilHandler` disguised as a legitimate protocol adapter. The malicious code is hidden within a helper import.
 2. Victims previously granted ComboProxy unlimited ERC20 approvals for legitimate strategies.
-3. When any victim executes the cached combo, the proxy delegatecalls `EvilHandler.rug`, which runs in the proxy’s context and uses the stored approvals/state.
-4. `transferFrom` pulls the victim’s entire balance to the attacker before the combo reverts or completes.
-5. Because the malicious handler stayed cached, every subsequent user who clicked “execute cached combo” was drained without additional interaction.
+3. When any victim executes the cached combo, the proxy delegatecalls `EvilHandler.rug`, which runs in the proxy's context and uses the stored approvals/state.
+4. `transferFrom` pulls the victim's entire balance to the attacker before the combo reverts or completes.
+5. Because the malicious handler stayed cached, every subsequent user who clicked "execute cached combo" was drained without additional interaction.
 
 | Security Challenge | Current Standard Solutions | PhaseGuard Solution |
 | :--- | :--- | :--- |
@@ -495,7 +476,7 @@ Attack path:
 
 ## 7 Callback exploit within a delegatecalled proxy context 
 
-Hook reentrancy that directly mutates vault balances as implementation runs in the proxy’s storage context.
+Hook reentrancy that directly mutates vault balances as implementation runs in the proxy's storage context.
 
 |  | Description |
 |-----------|-------------|
@@ -575,7 +556,7 @@ Attack path:
 
 | Security Challenge | Current Standard Solutions | PhaseGuard Solution |
 | :--- | :--- | :--- |
-| **Callback exploit in delegatecalled proxy** | Ban ERC777-style tokens, add `nonReentrant` modifiers, or use custom lock flags inside each hook | The guard blocks writes while externalizing, only enables callbacks inside a Callbacking phase with ALLOW_WRITES and ALLOW_EXTERNAL disabled, and forces execution to return back to the stable phase recorded on entry, so hooks can’t mutate stale state or loop outbound calls|
+| **Callback exploit in delegatecalled proxy** | Ban ERC777-style tokens, add `nonReentrant` modifiers, or use custom lock flags inside each hook | The guard blocks writes while externalizing, only enables callbacks inside a Callbacking phase with ALLOW_WRITES and ALLOW_EXTERNAL disabled, and forces execution to return back to the stable phase recorded on entry, so hooks can't mutate stale state or loop outbound calls|
 
 ## 8. Cross-Function State Bleeding (Per-ID)
 

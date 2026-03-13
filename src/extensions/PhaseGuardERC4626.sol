@@ -12,7 +12,7 @@ import { Math } from "@openzeppelin/utils/math/Math.sol";
 /// @notice ERC4626 vault with PhaseGuard lifecycle protection.
 /// @dev Handles all PhaseGuard wiring internally:
 /// - Public entry points (deposit, mint, withdraw, redeem) are gated with `withMutating`.
-/// - External asset transfers are wrapped with `_startExternalizing` / `_endExternalizing`.
+/// - External asset transfers occur during MUTATING — re-entry is blocked by `PhaseStabilityInvariant`.
 /// - External views (totalAssets, totalSupply, convertToShares, convertToAssets) are gated with `withView`.
 /// - Internal share math uses unguarded helpers to avoid breaking the ERC4626 call chain.
 ///
@@ -54,24 +54,6 @@ abstract contract PhaseGuardERC4626 is ERC4626, PhaseGuard {
         return super.redeem(shares, receiver, _owner);
     }
    
-    /*//////////////////////////////////////////////////////////////
-                INTERNAL HELPERS: Wrap external asset transfers.
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev Wraps the external `asset.safeTransferFrom()` call in the `EXTERNALIZING` phase.
-    function _transferIn(address from, uint256 assets) internal virtual override {
-        _startExternalizing();
-        super._transferIn(from, assets);
-        _endExternalizing();
-    }
-    
-    /// @dev Wraps the external `asset.safeTransfer()` call in the `EXTERNALIZING` phase.
-    function _transferOut(address to, uint256 assets) internal virtual override {
-        _startExternalizing();
-        super._transferOut(to, assets);
-        _endExternalizing();
-    }
-
     /*//////////////////////////////////////////////////////////////
         PUBLIC VIEW FUNCTIONS: withView 
         Guard against read-only reentrancy. 

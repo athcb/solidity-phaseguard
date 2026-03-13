@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import { PhaseGuardMock } from "../mocks/PhaseGuardMock.sol";
 import { PhaseGuard } from "../../src/PhaseGuard.sol";
 import { ERC721Receiver, ERC1155Receiver, ERC777Receiver, FlashLoanBorrower, MaliciousCallbackReceiver } from "../mocks/CallbackReceivers.sol";
-import { Test, console2 } from "forge-std/Test.sol";
+import { Test } from "forge-std/Test.sol";
 
 /// @dev Helper contract that calls either `transitionTo` when triggered 
 // or the dummy functions `dummyView`, `dummyMutating` in the mock contract implementing PhaseGuard, 
@@ -40,24 +40,17 @@ contract PhaseGuardTest is Test {
     PhaseGuard.Phase constant UNINITIALIZED = PhaseGuard.Phase.UNINITIALIZED;
     PhaseGuard.Phase constant READY = PhaseGuard.Phase.READY;
     PhaseGuard.Phase constant MUTATING = PhaseGuard.Phase.MUTATING;
-    PhaseGuard.Phase constant EXTERNALIZING = PhaseGuard.Phase.EXTERNALIZING;
-    PhaseGuard.Phase constant CALLBACKING = PhaseGuard.Phase.CALLBACKING;
     PhaseGuard.Phase constant FINALIZED = PhaseGuard.Phase.FINALIZED;
     PhaseGuard.Phase constant PAUSED = PhaseGuard.Phase.PAUSED;
     PhaseGuard.Phase constant MAINTENANCE = PhaseGuard.Phase.MAINTENANCE;
     
-    // Phase array
-    PhaseGuard.Phase[8] public phaseArray = [UNINITIALIZED, READY, MUTATING, EXTERNALIZING, CALLBACKING, FINALIZED, PAUSED, MAINTENANCE];
+    // Phase array (6 phases)
+    PhaseGuard.Phase[6] public phaseArray = [UNINITIALIZED, READY, MUTATING, FINALIZED, PAUSED, MAINTENANCE];
 
-    // Policy bit flags
-    uint8 constant ALLOW_USER        = 1 << 0;
-    uint8 constant ALLOW_ADMIN       = 1 << 1;
-    uint8 constant ALLOW_EXTERNAL    = 1 << 2;
-    uint8 constant ALLOW_VALUE       = 1 << 3;
-    uint8 constant ALLOW_VIEWS       = 1 << 4;
-    uint8 constant ALLOW_WRITES      = 1 << 5;
-    uint8 constant ALLOW_CALLBACKS   = 1 << 6;
-    uint8 constant ALLOW_DELEGATECALL = 1 << 7;
+    // Policy bit flags (3 enforced)
+    uint8 constant ALLOW_USER  = 1 << 0;
+    uint8 constant ALLOW_ADMIN = 1 << 1;
+    uint8 constant ALLOW_VIEWS = 1 << 2;
 
     function setUp() public {
         phaseGuard = new PhaseGuardMock();
@@ -98,21 +91,90 @@ contract PhaseGuardTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                      ERC-7201 NAMESPACED STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev The PHASEGUARD_STORAGE slot must match the ERC-7201 derivation:
+    /// keccak256(abi.encode(uint256(keccak256("phaseguard.storage.PhaseGuard")) - 1)) & ~bytes32(uint256(0xff))
+    function test_StorageSlotMatchesERC7201Derivation() public view {
+        bytes32 expected = keccak256(
+            abi.encode(uint256(keccak256("phaseguard.storage.PhaseGuard")) - 1)
+        ) & ~bytes32(uint256(0xff));
+
+        assertEq(
+            phaseGuard.phaseSlot(),
+            expected,
+            "PHASEGUARD_STORAGE slot does not match ERC-7201 derivation"
+        );
+    }
+
+    /// @dev Reading `_phase` directly from the raw ERC-7201 slot (offset 0)
+    /// should return the same value as the public `phase()` getter.
+    function test_RawPhaseMatchesPublicGetter() public view {
+        assertEq(
+            phaseGuard.rawPhase(),
+            uint8(phaseGuard.phase()),
+            "Raw storage phase should match phase()"
+        );
+    }
+
+    /// @dev After initialization, `_phase` at raw slot offset 0 should be READY (1).
+    function test_RawPhaseIsReadyAfterInit() public view {
+        assertEq(phaseGuard.rawPhase(), uint8(READY), "Raw phase should be READY (1) after init");
+    }
+
+    /// @dev Reading `_phaseStack.length` from raw slot offset 1 should match `phaseStackDepth()`.
+    function test_RawPhaseStackLengthMatchesPublicGetter() public view {
+        assertEq(
+            phaseGuard.rawPhaseStackLength(),
+            phaseGuard.phaseStackDepth(),
+            "Raw stack length should match phaseStackDepth()"
+        );
+    }
+
+    /// @dev After initialization, `_phaseStack.length` at raw slot offset 1 should be 1.
+    function test_RawPhaseStackLengthIsOneAfterInit() public view {
+        assertEq(phaseGuard.rawPhaseStackLength(), 1, "Raw stack length should be 1 after init");
+    }
+
+    /// @dev After a transitionTo(PAUSED), the raw phase slot should reflect the new phase.
+    function test_RawPhaseUpdatesAfterTransition() public {
+        phaseGuard.transitionTo(PAUSED);
+        assertEq(phaseGuard.rawPhase(), uint8(PAUSED), "Raw phase should update after transitionTo");
+        assertEq(phaseGuard.rawPhaseStackLength(), 1, "Stack length should remain 1 after transitionTo");
+    }
+
+    /// @dev Two independent PhaseGuard instances should use the same ERC-7201 slot
+    /// but their storage is isolated (different contract addresses).
+    function test_StorageIsolationBetweenInstances() public {
+        PhaseGuardMock second = new PhaseGuardMock();
+
+        // Both use the same slot constant
+        assertEq(phaseGuard.phaseSlot(), second.phaseSlot(), "Slot constant should be identical");
+
+        // Both initialized to READY
+        assertEq(phaseGuard.rawPhase(), second.rawPhase(), "Both should start at READY");
+
+        // Transition first instance to PAUSED, second stays READY
+        phaseGuard.transitionTo(PAUSED);
+        assertEq(phaseGuard.rawPhase(), uint8(PAUSED), "First should be PAUSED");
+        assertEq(second.rawPhase(), uint8(READY), "Second should still be READY");
+    }
+
+    /*//////////////////////////////////////////////////////////////
                             PURE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @dev `isTransitionAllowed`: test transition matrix
     // 1. `UNINITIALIZED` transitions
     function test_UninitializedTransitions() public view {
-        bool[8] memory allowedTo = [
-            false,  // UNINITIALIZED
-            true, // READY
+        bool[6] memory allowedTo = [
+            false, // UNINITIALIZED
+            true,  // READY
             false, // MUTATING
-            false, // EXTERNALIZING
-            false, // CALLBACKING
             false, // FINALIZED
             false, // PAUSED
-            false // MAINTENANCE   
+            false  // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -126,15 +188,13 @@ contract PhaseGuardTest is Test {
 
     // 2. `READY` transitions
     function test_ReadyTransitions() public view {
-        bool[8] memory allowedTo = [
-            false,  // UNINITIALIZED
+        bool[6] memory allowedTo = [
+            false, // UNINITIALIZED
             false, // READY
-            true, // MUTATING
-            false, // EXTERNALIZING
-            false, // CALLBACKING
-            true, // FINALIZED
-            true, // PAUSED
-            true // MAINTENANCE   
+            true,  // MUTATING
+            true,  // FINALIZED
+            true,  // PAUSED
+            true   // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -146,17 +206,15 @@ contract PhaseGuardTest is Test {
         }
     }
 
-    // 3. `MUTATING` transitions
+    // 3. `MUTATING` transitions: no forward transitions
     function test_MutatingTransitions() public view {
-        bool[8] memory allowedTo = [
-            false,  // UNINITIALIZED
-            false, // READY - only allowed during phase unwinding
+        bool[6] memory allowedTo = [
+            false, // UNINITIALIZED
+            false, // READY (only via stack unwind)
             false, // MUTATING
-            true, // EXTERNALIZING
-            false, // CALLBACKING
             false, // FINALIZED
             false, // PAUSED
-            false // MAINTENANCE   
+            false  // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -168,61 +226,15 @@ contract PhaseGuardTest is Test {
         }
     }
 
-    // 4. `EXTERNALIZING` transitions
-    function test_ExternalizingTransitions() public view {
-        bool[8] memory allowedTo = [
-            false,  // UNINITIALIZED
-            false, // READY 
-            false, // MUTATING - only allowed during phase unwinding
-            false, // EXTERNALIZING
-            true, // CALLBACKING
-            false, // FINALIZED
-            false, // PAUSED
-            false // MAINTENANCE   
-        ];
-
-        for (uint256 i = 0; i < phaseArray.length; i++) {
-            assertEq(
-                allowedTo[i], 
-                phaseGuard.isTransitionAllowed(EXTERNALIZING, phaseArray[i]),
-                string.concat("EXTERNALIZING -> Phase ", vm.toString(uint8(phaseArray[i])))
-            );
-        }
-    }
-
-    // 5. `CALLBACKING` transitions
-    function test_CallbackingTransitions() public view {
-        bool[8] memory allowedTo = [
-            false, // UNINITIALIZED
-            false, // READY 
-            false, // MUTATING 
-            false, // EXTERNALIZING - only allowed during phase unwinding
-            false, // CALLBACKING
-            false, // FINALIZED
-            false, // PAUSED
-            false // MAINTENANCE   
-        ];
-
-        for (uint256 i = 0; i < phaseArray.length; i++) {
-            assertEq(
-                allowedTo[i], 
-                phaseGuard.isTransitionAllowed(CALLBACKING, phaseArray[i]),
-                string.concat("CALLBACKING -> Phase ", vm.toString(uint8(phaseArray[i])))
-            );
-        }
-    }
-
-    // 6. `FINALIZED` transitions
+    // 4. `FINALIZED` transitions: terminal, no transitions
     function test_FinalizedTransitions() public view {
-        bool[8] memory allowedTo = [
+        bool[6] memory allowedTo = [
             false, // UNINITIALIZED
             false, // READY 
             false, // MUTATING 
-            false, // EXTERNALIZING 
-            false, // CALLBACKING
             false, // FINALIZED
             false, // PAUSED
-            false // MAINTENANCE   
+            false  // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -234,17 +246,15 @@ contract PhaseGuardTest is Test {
         }
     }
 
-    // 7. `PAUSED` transitions
+    // 5. `PAUSED` transitions
     function test_PausedTransitions() public view {
-        bool[8] memory allowedTo = [
+        bool[6] memory allowedTo = [
             false, // UNINITIALIZED
-            true, // READY 
+            true,  // READY 
             false, // MUTATING 
-            false, // EXTERNALIZING 
-            false, // CALLBACKING
-            true, // FINALIZED
+            true,  // FINALIZED
             false, // PAUSED
-            true // MAINTENANCE   
+            true   // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -256,17 +266,15 @@ contract PhaseGuardTest is Test {
         }
     }
 
-    // 8. `MAINTENANCE` transitions
+    // 6. `MAINTENANCE` transitions
     function test_MaintenanceTransitions() public view {
-        bool[8] memory allowedTo = [
+        bool[6] memory allowedTo = [
             false, // UNINITIALIZED
-            true, // READY 
-            true, // MUTATING 
-            false, // EXTERNALIZING 
-            false, // CALLBACKING
+            true,  // READY 
+            true,  // MUTATING 
             false, // FINALIZED
             false, // PAUSED
-            false // MAINTENANCE   
+            false  // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -279,151 +287,63 @@ contract PhaseGuardTest is Test {
     }
 
     /// @dev `getPolicy`: test policy per phase
-    // 1. `UNINITIALIZED` policy
+    // 1. `UNINITIALIZED` policy: all bits off
     function test_UninitializedPolicy() public view {
         uint8 policy = phaseGuard.getPolicy(UNINITIALIZED);
-
-        // Should not be set
-        assertEq(policy & ALLOW_USER, 0,        "UNINITIALIZED should not allow users");
-        assertEq(policy & ALLOW_ADMIN, 0,       "UNINITIALIZED should not allow admins");
-        assertEq(policy & ALLOW_EXTERNAL, 0,    "UNINITIALIZED should not allow external");
-        assertEq(policy & ALLOW_VALUE, 0,       "UNINITIALIZED should not allow value");
-        assertEq(policy & ALLOW_VIEWS, 0,       "UNINITIALIZED should not allow views");
-        assertEq(policy & ALLOW_WRITES, 0,      "UNINITIALIZED should not allow writes");
-        assertEq(policy & ALLOW_CALLBACKS, 0,   "UNINITIALIZED should not allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"UNINITIALIZED should not allow delegatecall");
+        assertEq(policy, 0, "UNINITIALIZED policy should be 0");
     }
 
-    // 2. `READY` policy
+    // 2. `READY` policy: ALLOW_USER | ALLOW_ADMIN | ALLOW_VIEWS
     function test_ReadyPolicy() public view {
         uint8 policy = phaseGuard.getPolicy(READY);
 
-        // Should be set
         assertEq(policy & ALLOW_USER, ALLOW_USER,   "READY should allow users");
         assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN, "READY should allow admins");
         assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "READY should allow views");
-
-        // Should not be set
-        assertEq(policy & ALLOW_EXTERNAL, 0,    "READY should not allow external");
-        assertEq(policy & ALLOW_VALUE, 0,       "READY should not allow value");
-        assertEq(policy & ALLOW_WRITES, 0,      "READY should not allow writes");
-        assertEq(policy & ALLOW_CALLBACKS, 0,   "READY should not allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"READY should not allow delegatecall");
     }
 
-    // 3. `MUTATING` policy
+    // 3. `MUTATING` policy: all bits off (unstable, blocks everything)
     function test_MutatingPolicy() public view {
         uint8 policy = phaseGuard.getPolicy(MUTATING);
-
-        // Should be set
-        assertEq(policy & ALLOW_WRITES, ALLOW_WRITES, "MUTATING should allow writes");
-
-        // Should not be set
-        assertEq(policy & ALLOW_USER, 0,        "MUTATING should not allow users");
-        assertEq(policy & ALLOW_ADMIN, 0,       "MUTATING should not allow admins");
-        assertEq(policy & ALLOW_EXTERNAL, 0,    "MUTATING should not allow external");
-        assertEq(policy & ALLOW_VALUE, 0,       "MUTATING should not allow value");
-        assertEq(policy & ALLOW_VIEWS, 0,       "MUTATING should not allow views");
-        assertEq(policy & ALLOW_CALLBACKS, 0,   "MUTATING should not allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"MUTATING should not allow delegatecall");
+        assertEq(policy, 0, "MUTATING policy should be 0");
     }
 
-    // 4. `EXTERNALIZING` policy
-    function test_ExternalizingPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(EXTERNALIZING);
-
-        // Should be set
-        assertEq(policy & ALLOW_EXTERNAL, ALLOW_EXTERNAL, "EXTERNALIZING should allow external");
-        assertEq(policy & ALLOW_VALUE, ALLOW_VALUE,       "EXTERNALIZING should allow value");
-
-        // Should not be set
-        assertEq(policy & ALLOW_USER, 0,        "EXTERNALIZING should not allow users");
-        assertEq(policy & ALLOW_ADMIN, 0,       "EXTERNALIZING should not allow admins");
-        assertEq(policy & ALLOW_VIEWS, 0,       "EXTERNALIZING should not allow views");
-        assertEq(policy & ALLOW_WRITES, 0,      "EXTERNALIZING should not allow writes");
-        assertEq(policy & ALLOW_CALLBACKS, 0,   "EXTERNALIZING should not allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"EXTERNALIZING should not allow delegatecall");
-    }
-
-    // 5. `CALLBACKING` policy
-    function test_CallbackingPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(CALLBACKING);
-
-        // Should be set
-        assertEq(policy & ALLOW_CALLBACKS, ALLOW_CALLBACKS, "CALLBACKING should allow callbacks");
-
-        // Should not be set
-        assertEq(policy & ALLOW_USER, 0,        "CALLBACKING should not allow users");
-        assertEq(policy & ALLOW_ADMIN, 0,       "CALLBACKING should not allow admins");
-        assertEq(policy & ALLOW_EXTERNAL, 0,    "CALLBACKING should not allow external");
-        assertEq(policy & ALLOW_VALUE, 0,       "CALLBACKING should not allow value");
-        assertEq(policy & ALLOW_VIEWS, 0,       "CALLBACKING should not allow views");
-        assertEq(policy & ALLOW_WRITES, 0,      "CALLBACKING should not allow writes");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"CALLBACKING should not allow delegatecall");
-    }
-
-    // 6. `FINALIZED` policy
+    // 4. `FINALIZED` policy: ALLOW_VIEWS only
     function test_FinalizedPolicy() public view {
         uint8 policy = phaseGuard.getPolicy(FINALIZED);
 
-        // Should be set
         assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "FINALIZED should allow views");
-
-        // Should not be set
-        assertEq(policy & ALLOW_USER, 0,        "FINALIZED should not allow users");
-        assertEq(policy & ALLOW_ADMIN, 0,       "FINALIZED should not allow admins");
-        assertEq(policy & ALLOW_EXTERNAL, 0,    "FINALIZED should not allow external");
-        assertEq(policy & ALLOW_VALUE, 0,       "FINALIZED should not allow value");
-        assertEq(policy & ALLOW_WRITES, 0,      "FINALIZED should not allow writes");
-        assertEq(policy & ALLOW_CALLBACKS, 0,   "FINALIZED should not allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"FINALIZED should not allow delegatecall");
+        assertEq(policy & ALLOW_USER, 0,  "FINALIZED should not allow users");
+        assertEq(policy & ALLOW_ADMIN, 0, "FINALIZED should not allow admins");
     }
 
-    // 7. `PAUSED` policy
+    // 5. `PAUSED` policy: ALLOW_ADMIN | ALLOW_VIEWS
     function test_PausedPolicy() public view {
         uint8 policy = phaseGuard.getPolicy(PAUSED);
 
-        // Should be set
         assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN, "PAUSED should allow admins");
         assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "PAUSED should allow views");
-
-        // Should not be set
-        assertEq(policy & ALLOW_USER, 0,        "PAUSED should not allow users");
-        assertEq(policy & ALLOW_EXTERNAL, 0,    "PAUSED should not allow external");
-        assertEq(policy & ALLOW_VALUE, 0,       "PAUSED should not allow value");
-        assertEq(policy & ALLOW_WRITES, 0,      "PAUSED should not allow writes");
-        assertEq(policy & ALLOW_CALLBACKS, 0,   "PAUSED should not allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, 0,"PAUSED should not allow delegatecall");
+        assertEq(policy & ALLOW_USER, 0, "PAUSED should not allow users");
     }
 
-    // 8. `MAINTENANCE` policy
+    // 6. `MAINTENANCE` policy: ALLOW_ADMIN | ALLOW_VIEWS
     function test_MaintenancePolicy() public view {
         uint8 policy = phaseGuard.getPolicy(MAINTENANCE);
 
-        // Should be set
-        assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN,             "MAINTENANCE should allow admins");
-        assertEq(policy & ALLOW_EXTERNAL, ALLOW_EXTERNAL,       "MAINTENANCE should allow external");
-        assertEq(policy & ALLOW_VALUE, ALLOW_VALUE,             "MAINTENANCE should allow value");
-        assertEq(policy & ALLOW_WRITES, ALLOW_WRITES,           "MAINTENANCE should allow writes");
-        assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS,             "MAINTENANCE should allow views");
-        assertEq(policy & ALLOW_CALLBACKS, ALLOW_CALLBACKS,     "MAINTENANCE should allow callbacks");
-        assertEq(policy & ALLOW_DELEGATECALL, ALLOW_DELEGATECALL,"MAINTENANCE should allow delegatecall");
-
-        // Should not be set
+        assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN, "MAINTENANCE should allow admins");
+        assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "MAINTENANCE should allow views");
         assertEq(policy & ALLOW_USER, 0, "MAINTENANCE should not allow users");
     }
 
-    /// @dev `isStable` should return true for READY, PAUSED, FINALIZED, MAINTENANCE
+    /// @dev `isStable` should return true for READY, FINALIZED, PAUSED, MAINTENANCE
     function test_IsStableReturnsTrueForStablePhases() public view {
-        bool[8] memory expected = [
+        bool[6] memory expected = [
             false, // UNINITIALIZED
-            true, // READY 
+            true,  // READY 
             false, // MUTATING 
-            false, // EXTERNALIZING 
-            false, // CALLBACKING
-            true, // FINALIZED
-            true, // PAUSED
-            true // MAINTENANCE   
+            true,  // FINALIZED
+            true,  // PAUSED
+            true   // MAINTENANCE   
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
@@ -447,7 +367,7 @@ contract PhaseGuardTest is Test {
         // Deploy attacker that will call transitionTo(PAUSED) when called
         AttackerReentrant attacker = new AttackerReentrant(address(phaseGuard));
 
-        // mutatingWithExternalCallTo will enter [READY, MUTATING, EXTERNALIZING] (depth 3),
+        // mutatingWithExternalCallTo will enter [READY, MUTATING] (depth 2),
         // then call attacker, which calls transitionTo -> _checkInvariants -> revert StackLengthInvariant
         vm.expectRevert("external call failed");
         phaseGuard.mutatingWithExternalCallTo(address(attacker), "");
@@ -561,173 +481,6 @@ contract PhaseGuardTest is Test {
         phaseGuard.mutatingWithExternalCallTo(address(attacker), abi.encodeWithSelector(AttackerReentrant.attackMutating.selector));
     }
 
-    /// @dev test withMutating + external call (happy path)
-    function test_withMutatingWithExternalCallSucceeds() public {
-        // Assert that events for the following phase transitions are emitted:
-        // 1. READY -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 4. MUTATING -> READY 
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
-        phaseGuard.mutatingWithExternalCall();
-
-        // Assert that global phase is back at READY
-        assertEq(uint8(phaseGuard.phase()), uint8(READY));
-        // Assert that phase stack depth is 1
-        assertEq(phaseGuard.phaseStackDepth(), 1);
-        // Assert that phase stack base is READY
-        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
-    }
-
-    /// @dev test withMutating + callback (happy path)
-    function test_withMutatingWithCallbackSucceeds() public {
-        // Assert that events for the following phase transitions are emitted:
-        // 1. READY -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> CALLBACK
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, CALLBACKING);
-        // 4. CALLBACK -> EXTERNALIZING 
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(CALLBACKING, EXTERNALIZING);
-        // 5. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 6. MUTATING -> READY 
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
-
-        phaseGuard.mutatingWithCallback();
-
-        // Assert that global phase is back at READY
-        assertEq(uint8(phaseGuard.phase()), uint8(READY));
-        // Assert that phase stack depth is 1
-        assertEq(phaseGuard.phaseStackDepth(), 1);
-        // Assert that phase stack base is READY
-        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
-    }
-
-
-    /// @dev test withMutating + multiple external calls (happy path)
-    function test_withMutatingWithMultipleExternalCallsSucceeds() public {
-        // Assert that events for the following phase transitions are emitted:
-        // First external call:
-        // 1. READY -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-       
-        // Second external call:
-        // 4. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 5. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 6. MUTATING -> READY 
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
-        
-        phaseGuard.mutatingWithMultipleExternalCalls();
-
-        // Assert that global phase is back at READY
-        assertEq(uint8(phaseGuard.phase()), uint8(READY));
-        // Assert that phase stack depth is 1
-        assertEq(phaseGuard.phaseStackDepth(), 1);
-        // Assert that phase stack base is READY
-        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
-    }
-
-    /// @dev test withMutating + mixed external calls (happy path)
-    function test_withMutatingWithMixedExternalCallsSucceeds() public {
-        // Assert that events for the following phase transitions are emitted:
-        // First external call:
-        // 1. READY -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-       
-        // Second external call with callback:
-        // 4. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 5. EXTERNALIZING -> CALLBACKING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, CALLBACKING);
-        // 6. CALLBACKING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(CALLBACKING, EXTERNALIZING);
-        // 7. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 8. MUTATING -> READY 
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
-        
-        phaseGuard.mutatingWithMixedExternalCalls();
-
-        // Assert that global phase is back at READY
-        assertEq(uint8(phaseGuard.phase()), uint8(READY));
-        // Assert that phase stack depth is 1
-        assertEq(phaseGuard.phaseStackDepth(), 1);
-        // Assert that phase stack base is READY
-        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY));
-    }
-
-    /// @dev test that withMutating + nested external calls reverts
-    function test_withMutatingWithNestedExternalCallsReverts() public {
-        // READY -> MUTATING -> EXTERNALIZING -> EXTERNALIZING etc.
-        // EXTERNALIZING -> EXTERNALIZING not allowed: policy should have ALLOW_WRITES to enter EXTERNALIZING
-        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
-        phaseGuard.mutatingWithNestedExternalCalls();
-    }
-
-    /// @dev test that withMutating + missing nested external call reverts
-    function test_withMutatingWithMissingNestedExternalCallsReverts() public {
-        // READY -> MUTATING -> EXTERNALIZING -> _exitPhase (pop EXTERNALIZING) -> _exitPhase (pop MUTATING): One _exitPhase is missing
-        // _checkInvariants() reverts with PhaseStabilityInvariant(): MUTATING is unstable
-        // StackLengthInvariant() would also be triggered if placed first
-        vm.expectRevert(PhaseGuard.PhaseStabilityInvariant.selector);
-        phaseGuard.missingNestedExternalCalls();
-    }
-
-    /// @dev test that withMutating + incorrect incorrect start helper pairing reverts
-    function test_withMutatingWithIncorrectStartHelperPairingReverts() public {
-        // READY -> MUTATING -> EXTERNALIZING -> _exitPhase (pop EXTERNALIZING) -> _exitPhase (pop MUTATING) -> _exitPhase (pop READY): One extra _exitPhase 
-        // _exitPhase reverts with StackSizeError(): 1 element left in stack when at least 2 are expected
-        vm.expectRevert(PhaseGuard.StackSizeError.selector);
-        phaseGuard.incorrectStartHelperPairing();
-    }
-
-     /// @dev test that withMutating + incorrect incorrect end helper pairing reverts
-    function test_withMutatingWithIncorrectEndHelperPairingReverts() public {
-        // READY -> MUTATING -> EXTERNALIZING -> CALLBACKING -> _exitPhase (pop CALLBACKING) -> _exitPhase (pop EXTERNALIZING) -> One missing _exitPhase to pop MUTATING
-        // _checkInvariants reverts with PhaseStabilityInvariant (current phase is MUTATING)
-        vm.expectRevert(PhaseGuard.PhaseStabilityInvariant.selector);
-        phaseGuard.incorrectEndHelperPairing();
-    }
-
     /// @dev test withView happy path
     function test_withViewReturnsValueOnlyWhenPhaseAllows() public {
         assertEq(phaseGuard.dummyView(), phaseGuard.counter(),  "READY should allow views");
@@ -751,10 +504,18 @@ contract PhaseGuardTest is Test {
         phaseGuard.mutatingWithExternalCallTo(address(attacker), abi.encodeWithSelector(AttackerReentrant.attackView.selector));
     }
 
-    /// @dev mutatingWithExternalCallTo succeeds when the target call succeeds (happy path).
-    /// READY -> MUTATING -> EXTERNALIZING -> (target succeeds) -> MUTATING -> READY
+    /// @dev External call to a target during MUTATING succeeds (happy path).
+    /// READY -> MUTATING -> (target call succeeds) -> READY
     function test_withMutatingExternalCallToSucceeds() public {
         ERC721Receiver receiver = new ERC721Receiver();
+
+        // Assert that events for the following phase transitions are emitted:
+        // 1. READY -> MUTATING
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        // 2. MUTATING -> READY 
+        vm.expectEmit(true, true, false, false);
+        emit PhaseGuard.PhaseTransition(MUTATING, READY);
 
         phaseGuard.mutatingWithExternalCallTo(
             address(receiver),
@@ -769,25 +530,66 @@ contract PhaseGuardTest is Test {
 
         assertTrue(receiver.called(), "Receiver should have been called");
         assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+        assertEq(phaseGuard.phaseStackDepth(), 1, "Stack depth should be 1");
+        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY), "Stack base should be READY");
     }
 
     /*//////////////////////////////////////////////////////////////
-                    CALLBACKING: LEGITIMATE CALLBACKS
+              CALLBACKS DURING MUTATING: RE-ENTRY BLOCKED
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev ERC721 `onERC721Received`: receiver returns selector during CALLBACKING (happy path)
+    /// @dev Malicious callback attempts to call a withView function during MUTATING → reverts
+    function test_CallbackReentrantViewReverts() public {
+        MaliciousCallbackReceiver malicious = new MaliciousCallbackReceiver(address(phaseGuard));
+        malicious.setAttackType(MaliciousCallbackReceiver.AttackType.VIEW);
+
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithExternalCallTo(
+            address(malicious),
+            abi.encodeWithSelector(
+                MaliciousCallbackReceiver.onERC721Received.selector,
+                address(phaseGuard),
+                address(this),
+                1,
+                ""
+            )
+        );
+    }
+
+    /// @dev Malicious callback attempts to call a withMutating function during MUTATING → reverts
+    function test_CallbackReentrantMutatingReverts() public {
+        MaliciousCallbackReceiver malicious = new MaliciousCallbackReceiver(address(phaseGuard));
+        malicious.setAttackType(MaliciousCallbackReceiver.AttackType.MUTATING);
+
+        vm.expectRevert("external call failed");
+        phaseGuard.mutatingWithExternalCallTo(
+            address(malicious),
+            abi.encodeWithSelector(
+                MaliciousCallbackReceiver.onERC721Received.selector,
+                address(phaseGuard),
+                address(this),
+                1,
+                ""
+            )
+        );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+          LEGITIMATE CALLBACKS DURING MUTATING (NON-REENTRANT)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev ERC721 receiver returns selector during an external call in MUTATING (happy path)
     function test_CallbackERC721ReceiverSucceeds() public {
         ERC721Receiver receiver = new ERC721Receiver();
 
-        // mutatingWithCallbackTo enters CALLBACKING and calls the receiver
-        phaseGuard.mutatingWithCallbackTo(
+        phaseGuard.mutatingWithExternalCallTo(
             address(receiver),
             abi.encodeWithSelector(
                 ERC721Receiver.onERC721Received.selector,
-                address(phaseGuard), // operator
-                address(this),       // from
-                1,                   // tokenId
-                ""                   // data
+                address(phaseGuard),
+                address(this),
+                1,
+                ""
             )
         );
 
@@ -795,19 +597,19 @@ contract PhaseGuardTest is Test {
         assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
     }
 
-    /// @dev ERC1155 `onERC1155Received`: receiver returns selector during CALLBACKING (happy path)
+    /// @dev ERC1155 receiver returns selector during an external call in MUTATING (happy path)
     function test_CallbackERC1155ReceiverSucceeds() public {
         ERC1155Receiver receiver = new ERC1155Receiver();
 
-        phaseGuard.mutatingWithCallbackTo(
+        phaseGuard.mutatingWithExternalCallTo(
             address(receiver),
             abi.encodeWithSelector(
                 ERC1155Receiver.onERC1155Received.selector,
-                address(phaseGuard), // operator
-                address(this),       // from
-                1,                   // id
-                100,                 // value
-                ""                   // data
+                address(phaseGuard),
+                address(this),
+                1,
+                100,
+                ""
             )
         );
 
@@ -815,20 +617,20 @@ contract PhaseGuardTest is Test {
         assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
     }
 
-    /// @dev ERC777 `tokensReceived`: receiver acknowledges receipt during CALLBACKING (happy path)
+    /// @dev ERC777 receiver acknowledges receipt during an external call in MUTATING (happy path)
     function test_CallbackERC777ReceiverSucceeds() public {
         ERC777Receiver receiver = new ERC777Receiver();
 
-        phaseGuard.mutatingWithCallbackTo(
+        phaseGuard.mutatingWithExternalCallTo(
             address(receiver),
             abi.encodeWithSelector(
                 ERC777Receiver.tokensReceived.selector,
-                address(phaseGuard), // operator
-                address(this),       // from
-                address(receiver),   // to
-                100,                 // amount
-                "",                  // userData
-                ""                   // operatorData
+                address(phaseGuard),
+                address(this),
+                address(receiver),
+                100,
+                "",
+                ""
             )
         );
 
@@ -836,91 +638,31 @@ contract PhaseGuardTest is Test {
         assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
     }
 
-    /// @dev Flash loan borrower executes arbitrage on a separate contract during CALLBACKING (happy path)
+    /// @dev Flash loan borrower executes arbitrage on a *separate* contract during MUTATING (happy path)
     function test_CallbackFlashLoanBorrowerSucceeds() public {
         FlashLoanBorrower borrower = new FlashLoanBorrower();
 
-        // The borrower's arb target is a separate contract (not the phaseGuard).
-        // We use a simple counter contract as the arb target.
         PhaseGuardMock arbTarget = new PhaseGuardMock();
         borrower.setArbCall(
             address(arbTarget),
             abi.encodeWithSelector(PhaseGuardMock.dummyMutating.selector)
         );
 
-        phaseGuard.mutatingWithCallbackTo(
+        phaseGuard.mutatingWithExternalCallTo(
             address(borrower),
             abi.encodeWithSelector(
                 FlashLoanBorrower.onFlashLoan.selector,
-                address(this),       // initiator
-                address(0),          // token
-                1000,                // amount
-                0,                   // fee
-                ""                   // data
+                address(this),
+                address(0),
+                1000,
+                0,
+                ""
             )
         );
 
         assertTrue(borrower.called(), "Flash loan borrower should have been called");
         assertEq(arbTarget.counter(), 1, "Arb target should have been mutated");
         assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
-    }
-
-    /*//////////////////////////////////////////////////////////////
-            CALLBACKING: MALICIOUS CALLBACKS (RE-ENTRY BLOCKED)
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev Malicious callback attempts to call a withView function during CALLBACKING → reverts
-    function test_CallbackReentrantViewReverts() public {
-        MaliciousCallbackReceiver malicious = new MaliciousCallbackReceiver(address(phaseGuard));
-        malicious.setAttackType(MaliciousCallbackReceiver.AttackType.VIEW);
-
-        vm.expectRevert("external call failed");
-        phaseGuard.mutatingWithCallbackTo(
-            address(malicious),
-            abi.encodeWithSelector(
-                MaliciousCallbackReceiver.onERC721Received.selector,
-                address(phaseGuard),
-                address(this),
-                1,
-                ""
-            )
-        );
-    }
-
-    /// @dev Malicious callback attempts to call a withMutating function during CALLBACKING → reverts
-    function test_CallbackReentrantMutatingReverts() public {
-        MaliciousCallbackReceiver malicious = new MaliciousCallbackReceiver(address(phaseGuard));
-        malicious.setAttackType(MaliciousCallbackReceiver.AttackType.MUTATING);
-
-        vm.expectRevert("external call failed");
-        phaseGuard.mutatingWithCallbackTo(
-            address(malicious),
-            abi.encodeWithSelector(
-                MaliciousCallbackReceiver.onERC721Received.selector,
-                address(phaseGuard),
-                address(this),
-                1,
-                ""
-            )
-        );
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                  SCOPED HELPERS WITHOUT WITHMUTATING
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev Trying to enter EXTERNALIZING from READY reverts with PolicyGateLocked
-    /// READY does not have ALLOW_WRITES so the policy gate blocks entry before the transition gate is reached.
-    function test_ExternalizingFromReadyReverts() public {
-        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
-        phaseGuard.externalizingFromReady();
-    }
-
-    /// @dev Trying to enter CALLBACKING from READY reverts with PolicyGateLocked
-    /// READY does not have ALLOW_EXTERNAL so the policy gate blocks entry before the transition gate is reached.
-    function test_CallbackingFromReadyReverts() public {
-        vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
-        phaseGuard.callbackingFromReady();
     }
 
 }
