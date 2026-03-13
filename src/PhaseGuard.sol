@@ -11,7 +11,6 @@ pragma solidity 0.8.30;
 /// 2. Override `_checkAdmin()` to enforce access control (e.g., `Ownable`, `AccessControl`).
 /// 3. Apply the `withMutating` modifier to all external state-changing functions.
 /// 4. Apply the `withView` modifier to all external view functions.
-/// 5. Wrap all external calls in `_startExternalizing()` / `_endExternalizing()` or `_startExternalizingWithCallback()` / `_endExternalizingWithCallback()`.
 abstract contract PhaseGuard {
 
     /*//////////////////////////////////////////////////////////////
@@ -24,11 +23,9 @@ abstract contract PhaseGuard {
         UNINITIALIZED, // 0: Not initialized, unstable
         READY, // 1: Initialized, stable
         MUTATING, // 2: Write phase, unstable
-        EXTERNALIZING, // 3: Outbound-call phase, unstable
-        CALLBACKING, // 4: Transient hook window, unstable
-        FINALIZED, // 5: Terminal locked state, stable
-        PAUSED, // 6: Temporary locked state, stable
-        MAINTENANCE // 7: Admin-only maintenance/upgrade window, stable
+        FINALIZED, // 3: Terminal locked state, stable
+        PAUSED, // 4: Temporary locked state, stable
+        MAINTENANCE // 5: Admin-only maintenance/upgrade window, stable
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -43,7 +40,7 @@ abstract contract PhaseGuard {
         Phase _phase;
         /// @dev Stack of phases tracked during each function call. Used to unwind nested transitions.
         /// First element is always the resting stable phase.
-        /// E.g.,  1. [READY] 2. [READY, MUTATING] 3. [READY, MUTATING, EXTERNALIZING] 4. [READY, MUTATING] 5. [READY]
+        /// E.g.,  1. [READY] 2. [READY, MUTATING] 3. [READY]
         Phase[] _phaseStack;
     }
 
@@ -58,18 +55,14 @@ abstract contract PhaseGuard {
     uint8 internal constant ALLOW_USER = 1 << 0; 
     /// @dev Allow inbound admin callers: bit 1
     uint8 internal constant ALLOW_ADMIN = 1 << 1;
-    /// @dev Allow outbound external calls to other contracts: bit 2
-    uint8 internal constant ALLOW_EXTERNAL = 1 << 2;
-    /// @dev Allow value / ETH transfers: bit 3
-    uint8 internal constant ALLOW_VALUE = 1 << 3;
-    /// @dev Allow access to view functions: bit 4
-    uint8 internal constant ALLOW_VIEWS = 1 << 4;
-    /// @dev Allow writing to storage: bit 5
-    uint8 internal constant ALLOW_WRITES = 1 << 5;
-    /// @dev Allow callbacks during external calls: bit 6
-    uint8 internal constant ALLOW_CALLBACKS = 1 << 6;
-    /// @dev Allow delegatecalls: bit 7
-    uint8 internal constant ALLOW_DELEGATECALL = 1 << 7;
+    /// @dev Allow access to view functions: bit 2
+    uint8 internal constant ALLOW_VIEWS = 1 << 2;
+    /// @dev Bits 3–7 reserved for future use.
+    // uint8 internal constant RESERVED_3 = 1 << 3;
+    // uint8 internal constant RESERVED_4 = 1 << 4;
+    // uint8 internal constant RESERVED_5 = 1 << 5;
+    // uint8 internal constant RESERVED_6 = 1 << 6;
+    // uint8 internal constant RESERVED_7 = 1 << 7;
 
 
     /*//////////////////////////////////////////////////////////////
@@ -258,31 +251,24 @@ abstract contract PhaseGuard {
                    to == Phase.MAINTENANCE; 
         }
 
-        // MUTATING (Phase ID 2) Transitions
-        if(from == Phase.MUTATING) {
-            return to == Phase.EXTERNALIZING; 
-        }
+        // MUTATING (Phase ID 2): No forward transitions.
+        // Entered via `withMutating`, unwound via stack pop.
 
-        // EXTERNALIZING (Phase ID 3) Transitions
-        if(from == Phase.EXTERNALIZING) {
-            return to == Phase.CALLBACKING;
-        }
+        // FINALIZED (Phase ID 3): Terminal state, no transitions allowed.
 
-        // PAUSED (Phase ID 6) Transitions
+        // PAUSED (Phase ID 4) Transitions
         if(from == Phase.PAUSED) {
             return to == Phase.READY || 
                    to == Phase.MAINTENANCE || 
                    to == Phase.FINALIZED; 
         }
 
-        // MAINTENANCE (Phase ID 7) Transitions
+        // MAINTENANCE (Phase ID 5) Transitions
         if(from == Phase.MAINTENANCE) {
             return to == Phase.READY || 
                    to == Phase.MUTATING; 
         }
 
-        // CALLBACKING (Phase ID 4): No forward transitions.
-        // FINALIZED (Phase ID 5): Terminal state, no transitions allowed.
         return false;
     }
 
@@ -295,7 +281,7 @@ abstract contract PhaseGuard {
                phase_ == Phase.FINALIZED ||
                phase_ == Phase.PAUSED ||
                phase_ == Phase.MAINTENANCE;
-    } 
+    }
 
     /// @notice Returns policy bitmask for a given phase.
     /// @dev Combines the individual bitflags to get the final uint8 bitmask. Override to customize. 
@@ -312,32 +298,22 @@ abstract contract PhaseGuard {
 
         // MUTATING (Phase ID 2) policy
         if(phase_ == Phase.MUTATING) {
-            return ALLOW_WRITES;
+            return 0;
         }
 
-        // EXTERNALIZING (Phase ID 3) policy
-        if(phase_ == Phase.EXTERNALIZING) {
-            return ALLOW_EXTERNAL | ALLOW_VALUE;
-        }
-
-        // CALLBACKING (Phase ID 4) policy
-        if(phase_ == Phase.CALLBACKING) {
-            return ALLOW_CALLBACKS;
-        }
-
-        // FINALIZED (Phase ID 5) policy
+        // FINALIZED (Phase ID 3) policy
         if(phase_ == Phase.FINALIZED) {
             return ALLOW_VIEWS;
         }
 
-        // PAUSED (Phase ID 6) policy
+        // PAUSED (Phase ID 4) policy
         if(phase_ == Phase.PAUSED) {
             return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
-        // MAINTENANCE (Phase ID 7) policy
+        // MAINTENANCE (Phase ID 5) policy
         if(phase_ == Phase.MAINTENANCE) {
-            return ALLOW_ADMIN | ALLOW_EXTERNAL | ALLOW_VALUE | ALLOW_WRITES | ALLOW_VIEWS | ALLOW_CALLBACKS | ALLOW_DELEGATECALL;
+            return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // Unreachable on Solidity ≥0.8.0 (enum bounds are validated at runtime).
@@ -371,97 +347,21 @@ abstract contract PhaseGuard {
     function _checkAdmin() internal view virtual;
 
     /*//////////////////////////////////////////////////////////////
-                           SCOPED HELPERS
-    //////////////////////////////////////////////////////////////*/
-
-    /*//////////////////////////////////////////////////////////////
-                             1. EXTERNALIZING
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Manually enters the `EXTERNALIZING` phase to permit outbound external calls.
-    /// @dev Must be paired with `_endExternalizing()` to safely unwind the state.
-    /// Requires the current phase to have `ALLOW_WRITES` (i.e., in MUTATING).
-    /// While EXTERNALIZING is active, storage writes are disabled to prevent state changes during the external call.
-    function _startExternalizing() internal {
-        // Only MUTATING can transition to EXTERNALIZING
-        // CALLBACKING can unwind back to EXTERNALIZING
-        uint8 requiredEntryPolicy = ALLOW_WRITES;
-        _enterPhase(Phase.EXTERNALIZING, requiredEntryPolicy);
-    }
-
-    /// @notice Unwinds the `EXTERNALIZING` phase.
-    /// @dev Must be paired with `_startExternalizing()`.
-    function _endExternalizing() internal {
-        _exitPhase();
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            2. CALLBACKING
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Scoped helper that manually enters the `EXTERNALIZING` and then `CALLBACKING` phase to permit outbound external calls with callbacks.
-    /// @dev Must be paired with `_endExternalizingWithCallback()` to safely unwind the state.
-    /// To enter the `CALLBACKING` phase, current phase has to be `EXTERNALIZING` (i.e., `ALLOW_EXTERNAL`).
-    /// While `CALLBACKING` is active, storage writes and entry to user-facing functions are disabled.
-    function _startExternalizingWithCallback() internal {
-        _startExternalizing();
-        _startCallbacking();
-    }
-
-    /// @notice Unwinds both the `CALLBACKING` and `EXTERNALIZING` phases (two stack frames).
-    /// @dev Must be paired with `_startExternalizingWithCallback()`.
-    function _endExternalizingWithCallback() internal {
-        // 1. Exit CALLBACKING
-        _endCallbacking();
-        // 2. Exit EXTERNALIZING
-        _endExternalizing();
-    }
-
-    /// @notice Manually enters the `CALLBACKING` phase to handle expected reentrant hooks (e.g., `onERC721Received`).
-    /// @dev Must be paired with `_endCallbacking()` or used via `_endExternalizingWithCallback()`.
-    /// Current phase must be `EXTERNALIZING` (policy allows `ALLOW_EXTERNAL`) otherwise it reverts.
-    /// Enables specific reentrancy paths (`ALLOW_CALLBACKS`) while keeping general user entry (`ALLOW_USER`) locked.
-    /// Use `_startExternalizingWithCallback()` instead of calling this directly to enforce correct nesting.
-    function _startCallbacking() internal {
-        // Only EXTERNALIZING can transition to CALLBACKING
-        uint8 requiredEntryPolicy = ALLOW_EXTERNAL;
-        _enterPhase(Phase.CALLBACKING, requiredEntryPolicy);
-    }
-
-    /// @notice Unwinds the `CALLBACKING` phase.
-    /// @dev Must be paired with `_startCallbacking()`.
-    /// Both `_endCallbacking` and `_endExternalizing` delegate to `_exitPhase` but are kept
-    /// as separate functions to mirror their `_start*` counterparts and show intent.
-    function _endCallbacking() internal {
-        _exitPhase();
-    }
-
-    /*//////////////////////////////////////////////////////////////
                             PRIVATE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Internal logic to validate and execute a forward phase transition.
-    /// @dev Two gates must pass before the transition is executed:
-    /// 1. Policy Gate: Current phase must have the required permission bits. 
-    /// 2. Transition Gate: The transition must be allowed in the matrix. 
+    /// @dev The caller is responsible for policy / access-control checks before
+    /// calling this function. `_enterPhase` only enforces the transition matrix
+    /// and performs the state update.
     /// Updates the global `_phase` and pushes the `toPhase` onto `_phaseStack`.
     /// @param toPhase Phase being entered.
-    /// @param requiredEntryPolicy Bitmask of permissions the current phase must possess to allow this transition.
-    /// @custom:error `PolicyGateLocked()` if the current phase's policy does not contain the required bitmask of permissions.
     /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
-    function _enterPhase(Phase toPhase, uint8 requiredEntryPolicy) private {
+    function _enterPhase(Phase toPhase) private {
         PhaseGuardStorage storage $ = _getStorage();
         Phase currentPhase = $._phase;
 
-        // Policy Gate: Check current policy against required permissions 
-        uint8 currentPolicy = getPolicy(currentPhase);
-        if( (currentPolicy & requiredEntryPolicy) == 0) {
-            revert PolicyGateLocked();
-        }
-
         // Transition Gate: Check if transition is allowed in the transition matrix.
-        // Unreachable under normal execution as the policy gate above is strict enough 
-        // to catch all invalid paths. Kept as defense-in-depth in case policies are overridden.
         bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
         if(!isAllowed) revert TransitionGateLocked();
         
@@ -548,12 +448,10 @@ abstract contract PhaseGuard {
             }
         }
         
-        // Require ALLOW_USER or ALLOW_ADMIN on the current phase to enter MUTATING.
-        // Only READY (user + admin) and MAINTENANCE (admin only) satisfy both the policy
-        // and the transition matrix. PAUSED has ALLOW_ADMIN but PAUSED -> MUTATING is
-        // blocked by the transition gate inside `_enterPhase`.
-        uint8 requiredEntryPolicy = ALLOW_USER | ALLOW_ADMIN;
-        _enterPhase(Phase.MUTATING, requiredEntryPolicy);
+        // Enter MUTATING phase. The transition gate inside `_enterPhase` enforces
+        // that only READY and MAINTENANCE can reach MUTATING. PAUSED has ALLOW_ADMIN
+        // but PAUSED -> MUTATING is blocked by the transition matrix.
+        _enterPhase(Phase.MUTATING);
     }
 
     /// @notice Post-execution cleanup logic for the Mutating modifier.

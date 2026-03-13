@@ -39,62 +39,10 @@ contract PhaseGuardMock is PhaseGuard {
                            COMPOSITE HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Happy path: READY -> MUTATING -> EXTERNALIZING -> MUTATING -> READY 
-    function mutatingWithExternalCall() external withMutating {
-        _startExternalizing();
-        _endExternalizing();
-    }
-
-    /// @dev Happy path: READY -> MUTATING -> EXTERNALIZING -> CALLBACKING -> EXTERNALIZING -> MUTATING -> READY 
-    function mutatingWithCallback() external withMutating {
-        _startExternalizingWithCallback();
-        _endExternalizingWithCallback();
-    }
-
-    /// @dev Happy path: Multiple READY -> MUTATING -> EXTERNALIZING -> MUTATING -> READY 
-    function mutatingWithMultipleExternalCalls() external withMutating {
-        // First external call
-        _startExternalizing();
-        _endExternalizing();
-
-        // Second external call
-        _startExternalizing();
-        _endExternalizing();
-    }
-
-
-    /// @dev Happy path: external call then external call with callback
-    function mutatingWithMixedExternalCalls() external withMutating {
-        // First external call
-        _startExternalizing();
-        _endExternalizing();
-
-        // Second external call
-        _startExternalizingWithCallback();
-        _endExternalizingWithCallback();
-    }
-
-    /// @dev Should revert: EXTERNALIZING -> EXTERNALIZING not allowed
-    function mutatingWithNestedExternalCalls() external withMutating {
-        _startExternalizing();
-        _startExternalizing(); 
-    }
-
-    /// @dev Should revert: missing state unwinding via `_endExternalizing`
-    function missingNestedExternalCalls() external withMutating {
-        _startExternalizing();
-    }
-
-    /// @dev Should revert: _startExternalizingWithCallback needs _endExternalizingWithCallback to pop two stack frames
-    function incorrectEndHelperPairing() external withMutating {
-        _startExternalizingWithCallback();
-        _endExternalizing();
-    }
-
-    /// @dev Should revert: _startExternalizing needs _endExternalizing to pop one stack frame
-    function incorrectStartHelperPairing() external withMutating {
-        _startExternalizing();
-        _endExternalizingWithCallback();
+    /// @dev Simulates an external call to a target during MUTATING.
+    function mutatingWithExternalCallTo(address target, bytes calldata data) external withMutating {
+        (bool success,) = target.call(data);
+        require(success, "external call failed");
     }
 
     /// @dev Should revert: double initialization
@@ -102,31 +50,34 @@ contract PhaseGuardMock is PhaseGuard {
         _phaseGuardInit();
     }
 
-    /// @dev Should revert: externalizing from READY
-    function externalizingFromReady() external {
-        _startExternalizing();
+    /*//////////////////////////////////////////////////////////////
+                     ERC-7201 NAMESPACE VERIFICATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Returns the raw storage slot for the `_phase` field.
+    /// The ERC-7201 base slot is the struct root; `_phase` is at offset 0,
+    /// and `_phaseStack` is at offset 1 (keccak256 of that for dynamic array data).
+    function phaseSlot() external pure returns (bytes32) {
+        // keccak256(abi.encode(uint256(keccak256("phaseguard.storage.PhaseGuard")) - 1)) & ~bytes32(uint256(0xff))
+        return 0x1b9524599e3b924a74c6b86d062db59fe7ffb1495cb93298113271b051cd8600;
     }
 
-    /// @dev Should revert: calling _startCallbacking from READY (not EXTERNALIZING)
-    function callbackingFromReady() external {
-        _startCallbacking();
+    /// @dev Reads `_phase` directly from the ERC-7201 storage slot (offset 0).
+    function rawPhase() external view returns (uint8) {
+        bytes32 slot = 0x1b9524599e3b924a74c6b86d062db59fe7ffb1495cb93298113271b051cd8600;
+        uint256 value;
+        assembly { value := sload(slot) }
+        return uint8(value);
     }
 
-    /// @dev Simulates an external call to a target during EXTERNALIZING
-    function mutatingWithExternalCallTo(address target, bytes calldata data) external withMutating {
-        _startExternalizing();
-        (bool success,) = target.call(data);
-        require(success, "external call failed");
-        _endExternalizing();
+    /// @dev Reads the `_phaseStack` array length from the ERC-7201 storage slot (offset 1).
+    function rawPhaseStackLength() external view returns (uint256) {
+        bytes32 slot = 0x1b9524599e3b924a74c6b86d062db59fe7ffb1495cb93298113271b051cd8600;
+        bytes32 stackLengthSlot;
+        assembly { stackLengthSlot := add(slot, 1) }
+        uint256 length;
+        assembly { length := sload(stackLengthSlot) }
+        return length;
     }
-
-    /// @dev Simulates an external call with callback to a target
-    function mutatingWithCallbackTo(address target, bytes calldata data) external withMutating {
-        _startExternalizingWithCallback();
-        (bool success,) = target.call(data);
-        require(success, "external call failed");
-        _endExternalizingWithCallback();
-    }
-
 
 }

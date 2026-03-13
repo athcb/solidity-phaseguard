@@ -6,8 +6,7 @@ import { ERC20Mock } from "../mocks/ERC20Mock.sol";
 import { ERC20WithTransferHook } from "../mocks/ERC20WithTransferHook.sol";
 import { PhaseGuard } from "../../src/PhaseGuard.sol";
 import { PhaseGuardERC4626 } from "../../src/extensions/PhaseGuardERC4626.sol";
-import { IERC20 } from "@openzeppelin/token/ERC20/IERC20.sol";
-import { Test, console2 } from "forge-std/Test.sol";
+import { Test } from "forge-std/Test.sol";
 
 
 contract PhaseGuardERC4626Test is Test {
@@ -21,24 +20,17 @@ contract PhaseGuardERC4626Test is Test {
     PhaseGuard.Phase constant UNINITIALIZED = PhaseGuard.Phase.UNINITIALIZED;
     PhaseGuard.Phase constant READY = PhaseGuard.Phase.READY;
     PhaseGuard.Phase constant MUTATING = PhaseGuard.Phase.MUTATING;
-    PhaseGuard.Phase constant EXTERNALIZING = PhaseGuard.Phase.EXTERNALIZING;
-    PhaseGuard.Phase constant CALLBACKING = PhaseGuard.Phase.CALLBACKING;
     PhaseGuard.Phase constant FINALIZED = PhaseGuard.Phase.FINALIZED;
     PhaseGuard.Phase constant PAUSED = PhaseGuard.Phase.PAUSED;
     PhaseGuard.Phase constant MAINTENANCE = PhaseGuard.Phase.MAINTENANCE;
     
-    // Phase array
-    PhaseGuard.Phase[8] public phaseArray = [UNINITIALIZED, READY, MUTATING, EXTERNALIZING, CALLBACKING, FINALIZED, PAUSED, MAINTENANCE];
+    // Phase array (6 phases)
+    PhaseGuard.Phase[6] public phaseArray = [UNINITIALIZED, READY, MUTATING, FINALIZED, PAUSED, MAINTENANCE];
 
-    // Policy bit flags
-    uint8 constant ALLOW_USER        = 1 << 0;
-    uint8 constant ALLOW_ADMIN       = 1 << 1;
-    uint8 constant ALLOW_EXTERNAL    = 1 << 2;
-    uint8 constant ALLOW_VALUE       = 1 << 3;
-    uint8 constant ALLOW_VIEWS       = 1 << 4;
-    uint8 constant ALLOW_WRITES      = 1 << 5;
-    uint8 constant ALLOW_CALLBACKS   = 1 << 6;
-    uint8 constant ALLOW_DELEGATECALL = 1 << 7;
+    // Policy bit flags (3 enforced)
+    uint8 constant ALLOW_USER  = 1 << 0;
+    uint8 constant ALLOW_ADMIN = 1 << 1;
+    uint8 constant ALLOW_VIEWS = 1 << 2;
 
     function setUp() public {
         // Underlying asset
@@ -79,7 +71,7 @@ contract PhaseGuardERC4626Test is Test {
 
     /// @dev When a user deposits assets and receives shares the PhaseGuard events 
     // are correctly emitted (happy path)
-    // READY -> MUTATING -> EXTERNALIZING (`_transferIn`) -> MUTATING -> READY
+    // READY -> MUTATING -> READY
     function test_DepositCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
         uint256 balanceAssetsBefore = asset.balanceOf(user);
@@ -89,13 +81,7 @@ contract PhaseGuardERC4626Test is Test {
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 4. MUTATING -> READY 
+        // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(MUTATING, READY);
 
@@ -181,7 +167,7 @@ contract PhaseGuardERC4626Test is Test {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev When a user mints shares the PhaseGuard events are correctly emitted (happy path)
-    // READY -> MUTATING -> EXTERNALIZING (`_transferIn`) -> MUTATING -> READY
+    // READY -> MUTATING -> READY
 
     function test_MintCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
@@ -192,13 +178,7 @@ contract PhaseGuardERC4626Test is Test {
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 4. MUTATING -> READY 
+        // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(MUTATING, READY);
 
@@ -285,7 +265,7 @@ contract PhaseGuardERC4626Test is Test {
 
     /// @dev When a user withdraws assets and their vault shares are burned 
     // the PhaseGuard events are correctly emitted (happy path)
-    // READY -> MUTATING -> EXTERNALIZING (`_transferOut`) -> MUTATING -> READY
+    // READY -> MUTATING -> READY
     function test_WithdrawCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
         vm.prank(user);
@@ -295,13 +275,7 @@ contract PhaseGuardERC4626Test is Test {
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 4. MUTATING -> READY 
+        // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(MUTATING, READY);
 
@@ -402,7 +376,7 @@ contract PhaseGuardERC4626Test is Test {
     // function redeem(uint256 shares, address receiver, address owner) public virtual returns (uint256) {
     /// @dev When a user redeems shares they receive the corresponding assets, their vault shares are burned 
     // the PhaseGuard events are correctly emitted (happy path)
-    // READY -> MUTATING -> EXTERNALIZING (`_transferOut`) -> MUTATING -> READY
+    // READY -> MUTATING -> READY
     function test_RedeemCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
         vm.prank(user);
@@ -412,13 +386,7 @@ contract PhaseGuardERC4626Test is Test {
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(READY, MUTATING);
-        // 2. MUTATING -> EXTERNALIZING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, EXTERNALIZING);
-        // 3. EXTERNALIZING -> MUTATING
-        vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(EXTERNALIZING, MUTATING);
-        // 4. MUTATING -> READY 
+        // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
         emit PhaseGuard.PhaseTransition(MUTATING, READY);
 
@@ -547,7 +515,7 @@ contract PhaseGuardERC4626Test is Test {
 
     /// @dev totalAssets, totalSupply, convertToAssets, convertToShares: 
     // should each revert with `ViewsLocked` when called via a transfer hook 
-    // during an unstable phase (ALLOW_VIEWS off): MUTATING, EXTERNALIZING, CALLBACKING.
+    // during an unstable phase (ALLOW_VIEWS off): MUTATING.
     // Each iteration deploys a fresh token+vault so the hook selector is the only variable.
     function test_ViewFunctionsRevertInUnstablePhases() public {
         bytes4[4] memory selectors = [
@@ -580,8 +548,8 @@ contract PhaseGuardERC4626Test is Test {
 
             hookToken.setHook(address(hookVault), hookData);
 
-            // deposit triggers: READY -> MUTATING -> EXTERNALIZING -> transferFrom -> _update -> hook
-            // The hook calls the view while in EXTERNALIZING (ALLOW_VIEWS off) -> ViewsLocked
+            // deposit triggers: READY -> MUTATING -> transferFrom -> _update -> hook
+            // The hook calls the view while in MUTATING (ALLOW_VIEWS off) -> ViewsLocked
             vm.prank(user);
             vm.expectRevert(PhaseGuard.ViewsLocked.selector);
             hookVault.deposit(amount, user);
