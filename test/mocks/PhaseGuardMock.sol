@@ -63,11 +63,9 @@ contract PhaseGuardMock is PhaseGuard {
     }
 
     /// @dev Reads `_phase` directly from the ERC-7201 storage slot (offset 0).
-    function rawPhase() external view returns (uint8) {
+    function rawPhase() external view returns (uint8 phase_) {
         bytes32 slot = 0x1b9524599e3b924a74c6b86d062db59fe7ffb1495cb93298113271b051cd8600;
-        uint256 value;
-        assembly { value := sload(slot) }
-        return uint8(value);
+        assembly { phase_ := and(sload(slot), 0xff) }
     }
 
     /// @dev Reads the `_phaseStack` array length from the ERC-7201 storage slot (offset 1).
