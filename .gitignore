@@ -12,7 +12,6 @@ out/
 
 # Docs (In-progress)
 project-docs
-docs
 
 # Foundry coverage
 lcov.info
