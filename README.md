@@ -2,13 +2,13 @@
 # PhaseGuard
 *Note: PhaseGuard is still in development and not ready for use*
 
-PhaseGuard is a smart contract lifecycle manager built around a finite state machine. By routing guarded entry points through a centralized 6-phase transition matrix with customizable access policies, it addresses reentrancy (including read-only and cross-function variants), uninitialized state exposure, and incomplete pause coverage. It also defines explicit operational states for admin-only maintenance and irreversible shutdown.
+PhaseGuard is a smart contract lifecycle manager built around a finite state machine. It routes guarded entry points through a shared 6-phase transition matrix with configurable access policies. The goal is to close off common lifecycle failures such as reentrancy, read-only reentrancy, uninitialized state exposure, and incomplete pause coverage, while also giving the contract explicit maintenance and shutdown states.
 
 ## Why it exists
 
-Today, lifecycle and safety logic is usually spread across individual modifiers such as `nonReentrant`, `whenNotPaused`, and initializer guards. That approach works, but it is local, repetitive, and easy to apply incompletely. `PhaseGuard` moves those concerns into one shared lifecycle machine so the public interface follows one transition matrix and one policy table.
+Today, lifecycle and safety logic is usually spread across separate modifiers such as `nonReentrant`, `whenNotPaused`, and initializer checks. That works, but it is easy to apply unevenly. `PhaseGuard` pulls those concerns into one lifecycle machine so the public interface follows the same transition rules and the same policy table.
 
-The current implementation is aimed at lifecycle-related failures: reentrancy, stale reads during unstable execution, incomplete pause coverage, premature use before bootstrap completes, and the absence of explicit maintenance and shutdown states.
+The current implementation is meant for lifecycle-related failures: reentrancy, stale reads during unstable execution, incomplete pause coverage, use before bootstrap finishes, and the lack of explicit maintenance and shutdown states.
 
 ## Core model
 
@@ -36,7 +36,7 @@ Allowed forward transitions:
 | PAUSED           |     NO        |  YES  |   NO     |   YES     |  -     |     YES     |
 | MAINTENANCE      |     NO        |  YES  |   YES    |   NO      |  NO    |      -      |
 
-`MUTATING` has no forward transitions. It is entered by `withMutating` and unwound by popping the phase stack. Its role is to block re-entry into other guarded entry points and suppress guarded views while the contract is mid-operation.
+`MUTATING` has no forward transitions. It is entered by `withMutating` and unwound by popping the phase stack. While the contract is in that phase, other guarded entry points are closed and guarded views are blocked.
 
 **Stable phases:**
 - READY, FINALIZED, PAUSED, MAINTENANCE: the contract **must** end every call in one of these phases.
@@ -68,10 +68,10 @@ The values below are the defaults built into `getPolicy()`. They can be overridd
 | ALLOW_ADMIN      |      NO       |  YES  |   NO     |   NO      |  YES   |     YES     |
 | ALLOW_VIEWS      |      NO       |  YES  |   NO     |   YES     |  YES   |     YES     |
 
-- `MUTATING` has all bits off. That is the core lock: no guarded user entry, no guarded admin entry, and no guarded view access while the contract is mid-operation.
-- `MAINTENANCE` keeps `ALLOW_USER` off while leaving `ALLOW_ADMIN` and `ALLOW_VIEWS` on, so operators can manage the contract without reopening end-user entry points.
-- Safe bootstrap requires: deploy -> UNINITIALIZED -> `_phaseGuardInit()` -> READY. If that step is missed, guarded entry remains blocked and the contract is effectively bricked.
-- `PAUSED` and `MAINTENANCE` share the same policy bits, but they are not equivalent states. The difference comes from the transition matrix: `MAINTENANCE` -> `MUTATING` is allowed, while `PAUSED` -> `MUTATING` is forbidden. In practice, `PAUSED` is a stop state, while `MAINTENANCE` is an admin-only operating state.
+- `MUTATING` has all bits off. That is the main lock: no guarded user entry, no guarded admin entry, and no guarded views while the contract is mid-operation.
+- `MAINTENANCE` keeps `ALLOW_USER` off while leaving `ALLOW_ADMIN` and `ALLOW_VIEWS` on, so operators can work on the contract without reopening user entry points.
+- Safe bootstrap is: deploy -> UNINITIALIZED -> `_phaseGuardInit()` -> READY. If that step is missed, guarded entry stays blocked and the contract is effectively bricked.
+- `PAUSED` and `MAINTENANCE` share the same policy bits, but they are not the same state. The difference comes from the transition matrix: `MAINTENANCE` -> `MUTATING` is allowed, while `PAUSED` -> `MUTATING` is not. In practice, `PAUSED` is a stop state, while `MAINTENANCE` is an admin-only operating state.
 
 ## Security properties
 
@@ -85,7 +85,7 @@ The current implementation covers the following exploit classes for guarded entr
 | Pause bypass / incomplete pause coverage | one user entry point misses `whenNotPaused` | phase-level policy closes guarded user entry in `PAUSED` |
 | Uninitialized state exposure | contract is used before bootstrap completes | guarded entry remains blocked in `UNINITIALIZED` |
 
-In addition to those exploit-oriented properties, `MAINTENANCE` provides an admin-only operating window: guarded user entry remains closed while guarded admin actions remain available. `FINALIZED` provides a terminal, view-only resting state for irreversible shutdown.
+Besides those exploit-oriented properties, `MAINTENANCE` gives you an admin-only operating window: guarded user entry stays closed while guarded admin actions remain available. `FINALIZED` gives you a terminal, view-only state for irreversible shutdown.
 
 Representative examples are documented in [`docs/security-model.md`](docs/security-model.md).
 
@@ -98,9 +98,9 @@ Representative examples are documented in [`docs/security-model.md`](docs/securi
 5. Apply `withView` to all external/public view functions.
 6. Use `transitionTo()` to move between stable lifecycle phases.
 
-For the model to work as intended, the public interface should be guarded by default. In practice, that means all external/public state-changing entry points should use `withMutating`, and all external/public view functions should use `withView`. The default is full interface coverage, not per-function judgment.
+For the model to work properly, the public interface should be guarded by default. In practice, that means all external/public state-changing entry points should use `withMutating`, and all external/public view functions should use `withView`. The default is whole-interface coverage, not function-by-function guesswork.
 
-Because guarded views are blocked during `MUTATING`, contracts may need a split-view pattern: keep the guarded external/public view as the public interface, and move the underlying read logic into an internal helper that state-changing functions can call directly.
+Because guarded views are blocked during `MUTATING`, contracts may need a split-view pattern: keep the guarded external/public view as the public interface, and move the shared read logic into an internal helper that mutating code can call directly.
 
 Minimal example:
 
@@ -131,7 +131,7 @@ Full integration guidance is in [`docs/integration.md`](docs/integration.md).
 
 ## Scope
 
-`PhaseGuard` is a lifecycle and guarded-entry primitive. It does not by itself solve oracle correctness, arithmetic bugs, slippage or MEV, access-control design, or arbitrary call / delegatecall vulnerabilities.
+`PhaseGuard` is a lifecycle and guarded-entry primitive. It does not solve oracle correctness, arithmetic bugs, slippage or MEV, access-control design, or arbitrary call / delegatecall vulnerabilities on its own.
 
 ## Status
 
