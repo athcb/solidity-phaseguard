@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
+import { IPhaseGuard } from "./IPhaseGuard.sol";
+
 /// @title PhaseGuard State Machine
 /// @author 0xathcb
 /// @notice PhaseGuard eliminates lifecycle security vulnerabilities by enforcing a rigid state machine for every contract call.
@@ -11,7 +13,7 @@ pragma solidity 0.8.30;
 /// 2. Override `_checkAdmin()` to enforce access control (e.g., `Ownable`, `AccessControl`).
 /// 3. Apply the `withMutating` modifier to all external state-changing functions.
 /// 4. Apply the `withView` modifier to all external view functions.
-abstract contract PhaseGuard {
+abstract contract PhaseGuard is IPhaseGuard {
 
     /*//////////////////////////////////////////////////////////////
                                  TYPES
@@ -64,15 +66,6 @@ abstract contract PhaseGuard {
     // uint8 internal constant RESERVED_6 = 1 << 6;
     // uint8 internal constant RESERVED_7 = 1 << 7;
 
-
-    /*//////////////////////////////////////////////////////////////
-                                 EVENTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Emitted when the contract transitions to a new phase.
-    /// @param from Phase being exited. 
-    /// @param to  Phase being entered.
-    event PhaseTransition(Phase from, Phase to);
 
     /*//////////////////////////////////////////////////////////////
                              CUSTOM ERRORS
@@ -141,7 +134,7 @@ abstract contract PhaseGuard {
         // Unreachable error under normal circumstances but added for defense-in-depth:
         if($._phaseStack.length != 0) revert StackSizeError();
         $._phaseStack.push($._phase);
-        emit PhaseTransition(Phase.UNINITIALIZED, Phase.READY);
+        emit PhaseTransition(uint8(Phase.UNINITIALIZED), uint8(Phase.READY));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -188,16 +181,16 @@ abstract contract PhaseGuard {
         Phase currentPhase = $._phase;
 
         // Fail early: avoids wasting gas on SSTOREs that would be reverted by _checkInvariants().
-        if(!isStable(toPhase)) revert PhaseStabilityInvariant();
+        if(!isStable(uint8(toPhase))) revert PhaseStabilityInvariant();
 
         // Transition Gate
-        bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
+        bool isAllowed = isTransitionAllowed(uint8(currentPhase), uint8(toPhase));
         if(!isAllowed) revert TransitionGateLocked();
         
         // State update
         $._phase = toPhase;
         $._phaseStack[0] = toPhase;
-        emit PhaseTransition(currentPhase, toPhase);
+        emit PhaseTransition(uint8(currentPhase), uint8(toPhase));
 
         _checkInvariants();
     }
@@ -207,9 +200,9 @@ abstract contract PhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Returns the current global phase of the contract.
-    /// @return The current `Phase` enum value.
-    function phase() public view returns (Phase) {
-        return _getStorage()._phase;
+    /// @return The current phase as a uint8.
+    function phase() public view returns (uint8) {
+        return uint8(_getStorage()._phase);
     }
 
     /// @notice Returns the current depth of the phase stack.
@@ -222,14 +215,21 @@ abstract contract PhaseGuard {
 
     /// @notice Returns the base (resting) phase at the bottom of the stack.
     /// @dev At rest, this should always equal `phase()`.
-    /// @return The first element of `_phaseStack`.
-    function phaseStackBase() public view returns (Phase) {
-        return _getStorage()._phaseStack[0];
+    /// @return The first element of `_phaseStack` as a uint8.
+    function phaseStackBase() public view returns (uint8) {
+        return uint8(_getStorage()._phaseStack[0]);
     }
 
     /*//////////////////////////////////////////////////////////////
                         PUBLIC PURE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice ERC-165 interface detection.
+    /// @param interfaceId The interface identifier to check.
+    /// @return True if `interfaceId` is `0x01ffc9a7` (ERC-165) or `0x90e42898` (IPhaseGuard).
+    function supportsInterface(bytes4 interfaceId) public pure virtual returns (bool) {
+        return interfaceId == 0x01ffc9a7 || interfaceId == 0x90e42898;
+    }
 
     /// @notice Evaluates whether a forward transition from one phase to another is allowed in the transition matrix.
     /// @dev Encodes only forward transitions. Reverse transitions (stack unwinding) are handled
@@ -237,18 +237,22 @@ abstract contract PhaseGuard {
     /// @param from Phase being exited.
     /// @param  to Phase being entered.
     /// @return true if the transition is allowed and false otherwise. 
-    function isTransitionAllowed(Phase from, Phase to) public pure virtual returns (bool) {
+    function isTransitionAllowed(uint8 from, uint8 to) public pure returns (bool) {
+        if(from > uint8(type(Phase).max) || to > uint8(type(Phase).max)) return false;
+        Phase f = Phase(from);
+        Phase t = Phase(to);
+
         // UNINITIALIZED (Phase ID 0) Transitions
-        if(from == Phase.UNINITIALIZED) {
-            return to == Phase.READY; 
+        if(f == Phase.UNINITIALIZED) {
+            return t == Phase.READY; 
         }
 
         // READY (Phase ID 1) Transitions
-        if(from == Phase.READY) {
-            return to == Phase.MUTATING || 
-                   to == Phase.FINALIZED || 
-                   to == Phase.PAUSED || 
-                   to == Phase.MAINTENANCE; 
+        if(f == Phase.READY) {
+            return t == Phase.MUTATING || 
+                   t == Phase.FINALIZED || 
+                   t == Phase.PAUSED || 
+                   t == Phase.MAINTENANCE; 
         }
 
         // MUTATING (Phase ID 2): No forward transitions.
@@ -257,16 +261,16 @@ abstract contract PhaseGuard {
         // FINALIZED (Phase ID 3): Terminal state, no transitions allowed.
 
         // PAUSED (Phase ID 4) Transitions
-        if(from == Phase.PAUSED) {
-            return to == Phase.READY || 
-                   to == Phase.MAINTENANCE || 
-                   to == Phase.FINALIZED; 
+        if(f == Phase.PAUSED) {
+            return t == Phase.READY || 
+                   t == Phase.MAINTENANCE || 
+                   t == Phase.FINALIZED; 
         }
 
         // MAINTENANCE (Phase ID 5) Transitions
-        if(from == Phase.MAINTENANCE) {
-            return to == Phase.READY || 
-                   to == Phase.MUTATING; 
+        if(f == Phase.MAINTENANCE) {
+            return t == Phase.READY || 
+                   t == Phase.MUTATING; 
         }
 
         return false;
@@ -276,48 +280,51 @@ abstract contract PhaseGuard {
     /// @dev Contract state MUST both start and end in a stable state when functions are entered or return. 
     /// @param phase_ Phase whose stability is being checked.
     /// @return true if given phase is stable.
-    function isStable(Phase phase_) public pure returns (bool) {
-        return phase_ == Phase.READY || 
-               phase_ == Phase.FINALIZED ||
-               phase_ == Phase.PAUSED ||
-               phase_ == Phase.MAINTENANCE;
+    function isStable(uint8 phase_) public pure returns (bool) {
+        if(phase_ > uint8(type(Phase).max)) return false;
+        Phase p = Phase(phase_);
+        return p == Phase.READY || 
+               p == Phase.FINALIZED ||
+               p == Phase.PAUSED ||
+               p == Phase.MAINTENANCE;
     }
 
     /// @notice Returns policy bitmask for a given phase.
-    /// @dev Combines the individual bitflags to get the final uint8 bitmask. Override to customize. 
+    /// @dev Returns values fixed by the PhaseGuard standard policy matrix.
     /// @param phase_ Phase whose policy is being fetched.
     /// @return uint8 policy of the given phase.
-    function getPolicy(Phase phase_) public pure virtual returns (uint8) {
+    function getPolicy(uint8 phase_) public pure returns (uint8) {
+        if(phase_ > uint8(type(Phase).max)) return 0;
+        Phase p = Phase(phase_);
+
         // UNINITIALIZED (Phase ID 0) policy
-        if(phase_ == Phase.UNINITIALIZED) return 0; 
+        if(p == Phase.UNINITIALIZED) return 0; 
 
         // READY (Phase ID 1) policy
-        if(phase_ == Phase.READY) {
+        if(p == Phase.READY) {
             return ALLOW_USER | ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // MUTATING (Phase ID 2) policy
-        if(phase_ == Phase.MUTATING) {
+        if(p == Phase.MUTATING) {
             return 0;
         }
 
         // FINALIZED (Phase ID 3) policy
-        if(phase_ == Phase.FINALIZED) {
+        if(p == Phase.FINALIZED) {
             return ALLOW_VIEWS;
         }
 
         // PAUSED (Phase ID 4) policy
-        if(phase_ == Phase.PAUSED) {
+        if(p == Phase.PAUSED) {
             return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // MAINTENANCE (Phase ID 5) policy
-        if(phase_ == Phase.MAINTENANCE) {
+        if(p == Phase.MAINTENANCE) {
             return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
-        // Unreachable on Solidity ≥0.8.0 (enum bounds are validated at runtime).
-        // Kept as defense-in-depth: blocks all entry-points for any unexpected value.
         return 0;
     }
     
@@ -362,13 +369,13 @@ abstract contract PhaseGuard {
         Phase currentPhase = $._phase;
 
         // Transition Gate: Check if transition is allowed in the transition matrix.
-        bool isAllowed = isTransitionAllowed(currentPhase, toPhase);
+        bool isAllowed = isTransitionAllowed(uint8(currentPhase), uint8(toPhase));
         if(!isAllowed) revert TransitionGateLocked();
         
         // State update
         $._phase = toPhase;
         $._phaseStack.push(toPhase);
-        emit PhaseTransition(currentPhase, toPhase);
+        emit PhaseTransition(uint8(currentPhase), uint8(toPhase));
     }
 
     /// @notice Internal logic to unwind the phase stack and return to the previous phase.
@@ -397,7 +404,7 @@ abstract contract PhaseGuard {
 
         // Restore the previous phase.
         $._phase = toPhase;
-        emit PhaseTransition(fromPhase, toPhase);
+        emit PhaseTransition(uint8(fromPhase), uint8(toPhase));
     }
 
     /// @notice Ensures the contract is in a valid resting state.
@@ -411,7 +418,7 @@ abstract contract PhaseGuard {
     function _checkInvariants() private view {
         PhaseGuardStorage storage $ = _getStorage();
         Phase currentPhase = $._phase;
-        if(!isStable(currentPhase)) revert PhaseStabilityInvariant();
+        if(!isStable(uint8(currentPhase))) revert PhaseStabilityInvariant();
         // The following two checks are defense-in-depth: under correct usage the
         // stability check above will catch misuse first, because unstable phases
         // are always pushed/popped together with the stack.
@@ -431,7 +438,7 @@ abstract contract PhaseGuard {
         _checkInvariants();
         
         Phase currentPhase = _getStorage()._phase;
-        uint8 currentPolicy = getPolicy(currentPhase);
+        uint8 currentPolicy = getPolicy(uint8(currentPhase));
 
         // Check access rights:
         bool isUserAllowed = (currentPolicy & ALLOW_USER) != 0;
@@ -465,7 +472,7 @@ abstract contract PhaseGuard {
 
     /// @dev Internal helper for `withView`. Wraps logic to reduce bytecode size.
     function _withView() private view {
-        if( (getPolicy(_getStorage()._phase) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
+        if( (getPolicy(uint8(_getStorage()._phase)) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
     }
 
     /// @dev Returns a pointer to the ERC-7201 namespaced storage struct.

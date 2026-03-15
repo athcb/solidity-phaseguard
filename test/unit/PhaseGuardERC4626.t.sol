@@ -5,6 +5,7 @@ import { PhaseGuardERC4626Mock } from "../mocks/PhaseGuardERC4626Mock.sol";
 import { ERC20Mock } from "../mocks/ERC20Mock.sol";
 import { ERC20WithTransferHook } from "../mocks/ERC20WithTransferHook.sol";
 import { PhaseGuard } from "../../src/PhaseGuard.sol";
+import { IPhaseGuard } from "../../src/IPhaseGuard.sol";
 import { PhaseGuardERC4626 } from "../../src/extensions/PhaseGuardERC4626.sol";
 import { Test } from "forge-std/Test.sol";
 
@@ -59,7 +60,7 @@ contract PhaseGuardERC4626Test is Test {
     /// @dev PhaseGuard vault is in phase READY after deployment with the 
     // correct underlying asset, name and symbol
     function test_VaultIsDeployedCorrectly() public view {
-        assertEq(uint8(pgVault.phase()), uint8(READY));
+        assertEq(pgVault.phase(), uint8(READY));
         assertEq(pgVault.asset(), address(asset));
         assertEq(pgVault.name(), "PhaseGuard Vault Share");
         assertEq(pgVault.symbol(), "pgvSHARE");
@@ -80,10 +81,10 @@ contract PhaseGuardERC4626Test is Test {
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
         // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         vm.prank(user);
         pgVault.deposit(amount, user);
@@ -177,10 +178,10 @@ contract PhaseGuardERC4626Test is Test {
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
         // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         vm.prank(user);
         pgVault.mint(amount, user);
@@ -274,10 +275,10 @@ contract PhaseGuardERC4626Test is Test {
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
         // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         uint256 balanceAssetsBefore = asset.balanceOf(user);
         uint256 balanceVaultSharesBefore = pgVault.balanceOf(user);
@@ -385,10 +386,10 @@ contract PhaseGuardERC4626Test is Test {
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
         // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         uint256 balanceAssetsBefore = asset.balanceOf(user);
         uint256 balanceVaultSharesBefore = pgVault.balanceOf(user);

@@ -3,6 +3,7 @@ pragma solidity 0.8.30;
 
 import { PhaseGuardMock } from "../mocks/PhaseGuardMock.sol";
 import { PhaseGuard } from "../../src/PhaseGuard.sol";
+import { IPhaseGuard } from "../../src/IPhaseGuard.sol";
 import { ERC721Receiver, ERC1155Receiver, ERC777Receiver, FlashLoanBorrower, MaliciousCallbackReceiver } from "../mocks/CallbackReceivers.sol";
 import { Test } from "forge-std/Test.sol";
 
@@ -65,13 +66,13 @@ contract PhaseGuardTest is Test {
     /// @dev PhaseGuard initialization should emit the `PhaseTransition` event.
     function test_InitEmitsPhaseTransition() public {
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(UNINITIALIZED, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(UNINITIALIZED), uint8(READY));
         new PhaseGuardMock();
     }
 
     /// @dev Global contract phase should be READY after initialization
     function test_InitSetsPhaseToReady() public view {
-        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        assertEq(phaseGuard.phase(), uint8(READY));
     }
     
     /// @dev Re-initialization fails with `TransitionGateLocked()`
@@ -87,7 +88,7 @@ contract PhaseGuardTest is Test {
 
     /// @dev The base phase at the bottom of _phaseStack should be equal to the global contract phase
     function test_PhaseStackFirstElementIsGlobalPhase() public view {
-        assertEq(uint8(phaseGuard.phase()), uint8(phaseGuard.phaseStackBase()));
+        assertEq(phaseGuard.phase(), phaseGuard.phaseStackBase());
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -113,7 +114,7 @@ contract PhaseGuardTest is Test {
     function test_RawPhaseMatchesPublicGetter() public view {
         assertEq(
             phaseGuard.rawPhase(),
-            uint8(phaseGuard.phase()),
+            phaseGuard.phase(),
             "Raw storage phase should match phase()"
         );
     }
@@ -180,7 +181,7 @@ contract PhaseGuardTest is Test {
         for (uint256 i = 0; i < phaseArray.length; i++) {
             assertEq(
                 allowedTo[i], 
-                phaseGuard.isTransitionAllowed(UNINITIALIZED, phaseArray[i]),
+                phaseGuard.isTransitionAllowed(uint8(UNINITIALIZED), uint8(phaseArray[i])),
                 string.concat("UNINITIALIZED -> Phase ", vm.toString(uint8(phaseArray[i])))
             );
         }
@@ -200,7 +201,7 @@ contract PhaseGuardTest is Test {
         for (uint256 i = 0; i < phaseArray.length; i++) {
             assertEq(
                 allowedTo[i], 
-                phaseGuard.isTransitionAllowed(READY, phaseArray[i]),
+                phaseGuard.isTransitionAllowed(uint8(READY), uint8(phaseArray[i])),
                 string.concat("READY -> Phase ", vm.toString(uint8(phaseArray[i])))
             );
         }
@@ -220,7 +221,7 @@ contract PhaseGuardTest is Test {
         for (uint256 i = 0; i < phaseArray.length; i++) {
             assertEq(
                 allowedTo[i], 
-                phaseGuard.isTransitionAllowed(MUTATING, phaseArray[i]),
+                phaseGuard.isTransitionAllowed(uint8(MUTATING), uint8(phaseArray[i])),
                 string.concat("MUTATING -> Phase ", vm.toString(uint8(phaseArray[i])))
             );
         }
@@ -240,7 +241,7 @@ contract PhaseGuardTest is Test {
         for (uint256 i = 0; i < phaseArray.length; i++) {
             assertEq(
                 allowedTo[i], 
-                phaseGuard.isTransitionAllowed(FINALIZED, phaseArray[i]),
+                phaseGuard.isTransitionAllowed(uint8(FINALIZED), uint8(phaseArray[i])),
                 string.concat("FINALIZED -> Phase ", vm.toString(uint8(phaseArray[i])))
             );
         }
@@ -260,7 +261,7 @@ contract PhaseGuardTest is Test {
         for (uint256 i = 0; i < phaseArray.length; i++) {
             assertEq(
                 allowedTo[i], 
-                phaseGuard.isTransitionAllowed(PAUSED, phaseArray[i]),
+                phaseGuard.isTransitionAllowed(uint8(PAUSED), uint8(phaseArray[i])),
                 string.concat("PAUSED -> Phase ", vm.toString(uint8(phaseArray[i])))
             );
         }
@@ -280,7 +281,7 @@ contract PhaseGuardTest is Test {
         for (uint256 i = 0; i < phaseArray.length; i++) {
             assertEq(
                 allowedTo[i], 
-                phaseGuard.isTransitionAllowed(MAINTENANCE, phaseArray[i]),
+                phaseGuard.isTransitionAllowed(uint8(MAINTENANCE), uint8(phaseArray[i])),
                 string.concat("MAINTENANCE -> Phase ", vm.toString(uint8(phaseArray[i])))
             );
         }
@@ -289,13 +290,13 @@ contract PhaseGuardTest is Test {
     /// @dev `getPolicy`: test policy per phase
     // 1. `UNINITIALIZED` policy: all bits off
     function test_UninitializedPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(UNINITIALIZED);
+        uint8 policy = phaseGuard.getPolicy(uint8(UNINITIALIZED));
         assertEq(policy, 0, "UNINITIALIZED policy should be 0");
     }
 
     // 2. `READY` policy: ALLOW_USER | ALLOW_ADMIN | ALLOW_VIEWS
     function test_ReadyPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(READY);
+        uint8 policy = phaseGuard.getPolicy(uint8(READY));
 
         assertEq(policy & ALLOW_USER, ALLOW_USER,   "READY should allow users");
         assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN, "READY should allow admins");
@@ -304,13 +305,13 @@ contract PhaseGuardTest is Test {
 
     // 3. `MUTATING` policy: all bits off (unstable, blocks everything)
     function test_MutatingPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(MUTATING);
+        uint8 policy = phaseGuard.getPolicy(uint8(MUTATING));
         assertEq(policy, 0, "MUTATING policy should be 0");
     }
 
     // 4. `FINALIZED` policy: ALLOW_VIEWS only
     function test_FinalizedPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(FINALIZED);
+        uint8 policy = phaseGuard.getPolicy(uint8(FINALIZED));
 
         assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "FINALIZED should allow views");
         assertEq(policy & ALLOW_USER, 0,  "FINALIZED should not allow users");
@@ -319,7 +320,7 @@ contract PhaseGuardTest is Test {
 
     // 5. `PAUSED` policy: ALLOW_ADMIN | ALLOW_VIEWS
     function test_PausedPolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(PAUSED);
+        uint8 policy = phaseGuard.getPolicy(uint8(PAUSED));
 
         assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN, "PAUSED should allow admins");
         assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "PAUSED should allow views");
@@ -328,7 +329,7 @@ contract PhaseGuardTest is Test {
 
     // 6. `MAINTENANCE` policy: ALLOW_ADMIN | ALLOW_VIEWS
     function test_MaintenancePolicy() public view {
-        uint8 policy = phaseGuard.getPolicy(MAINTENANCE);
+        uint8 policy = phaseGuard.getPolicy(uint8(MAINTENANCE));
 
         assertEq(policy & ALLOW_ADMIN, ALLOW_ADMIN, "MAINTENANCE should allow admins");
         assertEq(policy & ALLOW_VIEWS, ALLOW_VIEWS, "MAINTENANCE should allow views");
@@ -347,7 +348,7 @@ contract PhaseGuardTest is Test {
         ];
 
         for (uint256 i = 0; i < phaseArray.length; i++) {
-            assertTrue(phaseGuard.isStable(phaseArray[i]) == expected[i]);
+            assertTrue(phaseGuard.isStable(uint8(phaseArray[i])) == expected[i]);
         }
     }
 
@@ -396,18 +397,18 @@ contract PhaseGuardTest is Test {
     function test_TransitionToCorrectlyUpdatesPhaseAndStack() public {
         vm.prank(owner);
         // Assert that phase before transition is READY
-        assertEq(uint8(phaseGuard.phase()), uint8(READY));
+        assertEq(phaseGuard.phase(), uint8(READY));
         // Check that event PhaseTransition(currentPhase, toPhase) will be emitted
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, PAUSED);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(PAUSED));
         // READY -> PAUSED allowed
         phaseGuard.transitionTo(PAUSED);
         // Assert that global phase after transition is PAUSED
-        assertEq(uint8(phaseGuard.phase()), uint8(PAUSED));
+        assertEq(phaseGuard.phase(), uint8(PAUSED));
         // Assert that _phaseStack contains only 1 element
         assertEq(phaseGuard.phaseStackDepth(), 1);
         // Assert that _phaseStack base element is equal to the global phase 
-        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(PAUSED));
+        assertEq(phaseGuard.phaseStackBase(), uint8(PAUSED));
     }
 
      /*//////////////////////////////////////////////////////////////
@@ -417,15 +418,15 @@ contract PhaseGuardTest is Test {
     /// @dev test withMutating happy path
     function test_withMutatingUpdatesStateAndResetsPhase() public {
         uint256 counterBefore = phaseGuard.counter();
-        PhaseGuard.Phase phaseBefore = phaseGuard.phase();
+        uint8 phaseBefore = phaseGuard.phase();
         
         // Assert that the global phase will transition mid-call from 
         // 1. READY -> MUTATING and
         // 2. MUTATING -> READY
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
         phaseGuard.dummyMutating();
         
         // Assert that state has been updated
@@ -512,10 +513,10 @@ contract PhaseGuardTest is Test {
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(READY, MUTATING);
+        emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
         // 2. MUTATING -> READY 
         vm.expectEmit(true, true, false, false);
-        emit PhaseGuard.PhaseTransition(MUTATING, READY);
+        emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         phaseGuard.mutatingWithExternalCallTo(
             address(receiver),
@@ -529,9 +530,9 @@ contract PhaseGuardTest is Test {
         );
 
         assertTrue(receiver.called(), "Receiver should have been called");
-        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+        assertEq(phaseGuard.phase(), uint8(READY), "Phase should return to READY");
         assertEq(phaseGuard.phaseStackDepth(), 1, "Stack depth should be 1");
-        assertEq(uint8(phaseGuard.phaseStackBase()), uint8(READY), "Stack base should be READY");
+        assertEq(phaseGuard.phaseStackBase(), uint8(READY), "Stack base should be READY");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -594,7 +595,7 @@ contract PhaseGuardTest is Test {
         );
 
         assertTrue(receiver.called(), "ERC721 receiver should have been called");
-        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+        assertEq(phaseGuard.phase(), uint8(READY), "Phase should return to READY");
     }
 
     /// @dev ERC1155 receiver returns selector during an external call in MUTATING (happy path)
@@ -614,7 +615,7 @@ contract PhaseGuardTest is Test {
         );
 
         assertTrue(receiver.called(), "ERC1155 receiver should have been called");
-        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+        assertEq(phaseGuard.phase(), uint8(READY), "Phase should return to READY");
     }
 
     /// @dev ERC777 receiver acknowledges receipt during an external call in MUTATING (happy path)
@@ -635,7 +636,7 @@ contract PhaseGuardTest is Test {
         );
 
         assertTrue(receiver.called(), "ERC777 receiver should have been called");
-        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+        assertEq(phaseGuard.phase(), uint8(READY), "Phase should return to READY");
     }
 
     /// @dev Flash loan borrower executes arbitrage on a *separate* contract during MUTATING (happy path)
@@ -662,7 +663,66 @@ contract PhaseGuardTest is Test {
 
         assertTrue(borrower.called(), "Flash loan borrower should have been called");
         assertEq(arbTarget.counter(), 1, "Arb target should have been mutated");
-        assertEq(uint8(phaseGuard.phase()), uint8(READY), "Phase should return to READY");
+        assertEq(phaseGuard.phase(), uint8(READY), "Phase should return to READY");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    OUT-OF-RANGE uint8 BOUNDS CHECKS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev `isTransitionAllowed` returns false when `from` is out of range
+    function test_IsTransitionAllowed_OutOfRangeFrom_ReturnsFalse() public view {
+        assertFalse(phaseGuard.isTransitionAllowed(6, uint8(READY)), "from=6 should return false");
+        assertFalse(phaseGuard.isTransitionAllowed(100, uint8(READY)), "from=100 should return false");
+        assertFalse(phaseGuard.isTransitionAllowed(255, uint8(READY)), "from=255 should return false");
+    }
+
+    /// @dev `isTransitionAllowed` returns false when `to` is out of range
+    function test_IsTransitionAllowed_OutOfRangeTo_ReturnsFalse() public view {
+        assertFalse(phaseGuard.isTransitionAllowed(uint8(READY), 6), "to=6 should return false");
+        assertFalse(phaseGuard.isTransitionAllowed(uint8(READY), 100), "to=100 should return false");
+        assertFalse(phaseGuard.isTransitionAllowed(uint8(READY), 255), "to=255 should return false");
+    }
+
+    /// @dev `isTransitionAllowed` returns false when both are out of range
+    function test_IsTransitionAllowed_BothOutOfRange_ReturnsFalse() public view {
+        assertFalse(phaseGuard.isTransitionAllowed(6, 7), "both out of range should return false");
+        assertFalse(phaseGuard.isTransitionAllowed(255, 255), "max uint8 both should return false");
+    }
+
+    /// @dev `getPolicy` returns 0 for out-of-range phase IDs
+    function test_GetPolicy_OutOfRange_ReturnsZero() public view {
+        assertEq(phaseGuard.getPolicy(6), 0, "getPolicy(6) should return 0");
+        assertEq(phaseGuard.getPolicy(100), 0, "getPolicy(100) should return 0");
+        assertEq(phaseGuard.getPolicy(255), 0, "getPolicy(255) should return 0");
+    }
+
+    /// @dev `isStable` returns false for out-of-range phase IDs
+    function test_IsStable_OutOfRange_ReturnsFalse() public view {
+        assertFalse(phaseGuard.isStable(6), "isStable(6) should return false");
+        assertFalse(phaseGuard.isStable(100), "isStable(100) should return false");
+        assertFalse(phaseGuard.isStable(255), "isStable(255) should return false");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ERC-165 SUPPORT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev supportsInterface returns true for ERC-165 identifier
+    function test_SupportsInterface_ERC165() public view {
+        assertTrue(phaseGuard.supportsInterface(0x01ffc9a7), "should support ERC-165");
+    }
+
+    /// @dev supportsInterface returns true for IPhaseGuard identifier
+    function test_SupportsInterface_IPhaseGuard() public view {
+        assertTrue(phaseGuard.supportsInterface(0x90e42898), "should support IPhaseGuard");
+    }
+
+    /// @dev supportsInterface returns false for unsupported interface
+    function test_SupportsInterface_Unsupported() public view {
+        assertFalse(phaseGuard.supportsInterface(0xffffffff), "0xffffffff should not be supported");
+        assertFalse(phaseGuard.supportsInterface(0x00000000), "0x00000000 should not be supported");
+        assertFalse(phaseGuard.supportsInterface(0xdeadbeef), "random selector should not be supported");
     }
 
 }
