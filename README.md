@@ -2,7 +2,7 @@
 
 ## Abstract
 
-A standard interface for smart contracts that manage their lifecycle through a finite state machine. A conforming contract exposes its current phase, a per-phase access-policy bitmask, and a transition-legality check through three read functions and one event. All guarded entry points share a single 6-phase transition matrix, so lifecycle protection is applied at the phase level rather than per-function.
+A standard interface for smart contracts that manage their lifecycle through a finite state machine. A conforming contract exposes its current phase, a per-phase access-policy bitmask, and a transition-legality check through four read functions and one event. All guarded entry points share a single 6-phase transition matrix, so lifecycle protection is applied at the phase level rather than per-function.
 
 ## Motivation
 
@@ -10,7 +10,7 @@ Smart contract lifecycle protection is typically assembled from independent mech
 
 That per-function approach keeps producing the same exploit classes: reentrancy (including read-only and cross-function variants), incomplete pause coverage, and uninitialized state exposure. See Security Considerations for a detailed mapping of each class to the phase model.
 
-No existing ERC defines a common interface for contract lifecycle state. Existing patterns address individual concerns, but expose only isolated, implementation-specific signals. A contract may expose `paused()`, but there is no standard way for an external caller to query bootstrap state, in-flight mutation, maintenance mode, terminal finalization, or transition legality.
+Existing patterns address individual concerns, but expose only isolated, implementation-specific signals. A contract may expose `paused()`, but there is no standard way for an external caller to query bootstrap state, in-flight mutation, maintenance mode, terminal finalization, or transition legality.
 
 A standard interface would let composing contracts check a dependency's lifecycle phase before routing funds or executing a governance action. A contract could avoid calling a dependency while it is MUTATING, a timelock could verify a target is in READY before executing a queued proposal, and a monitoring system could watch for phase changes across any conforming contract without per-protocol adapters.
 
@@ -21,8 +21,8 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 ### Definitions
 
 - **phase**: a `uint8` value identifying the current lifecycle state of the contract.
-- **stable phase**: a phase that MAY persist as the global phase after an external call completes (READY, FINALIZED, PAUSED, MAINTENANCE).
-- **unstable phase**: a phase that MUST NOT persist as the global phase after an external call completes (UNINITIALIZED, MUTATING).
+- **stable phase**: a phase that MAY persist as the global phase when a guarded function completes (READY, FINALIZED, PAUSED, MAINTENANCE).
+- **unstable phase**: a phase that MUST NOT persist as the global phase when a guarded function completes (UNINITIALIZED, MUTATING).
 - **guarded entry point**: an `external` or `public` function that carries a guard modifier and is therefore subject to phase-level access control.
 - **bootstrap**: the one-time transition from UNINITIALIZED to READY that activates the contract.
 - **admin**: an address authorized by the implementation to trigger phase transitions between stable phases.
@@ -170,9 +170,9 @@ Phase identifiers are `uint8` values. A conforming contract MUST use the followi
 | 4  | PAUSED         | Stable    | Emergency stop. User entry is blocked. Admin entry and views remain permitted.           |
 | 5  | MAINTENANCE    | Stable    | Admin-only operating window. User entry is blocked. Admin entry and views remain permitted. |
 
-A conforming contract MUST end every external call in a stable phase (READY, FINALIZED, PAUSED, or MAINTENANCE).
+A conforming contract MUST return to a stable phase (READY, FINALIZED, PAUSED, or MAINTENANCE) before any guarded function completes.
 
-MUTATING is entered and exited internally by the guard mechanism. It has no forward transitions in the transition matrix and MUST NOT persist as the global phase after a call completes.
+MUTATING is entered and exited internally by the guard mechanism. It has no forward transitions in the transition matrix and MUST NOT persist as the global phase when a guarded function returns.
 
 UNINITIALIZED is the default state at deployment. If bootstrap does not complete, all guarded entry MUST remain blocked.
 
@@ -195,7 +195,7 @@ PAUSED and MAINTENANCE share the same policy bits but differ in the transition m
 
 ### Policy bitmask
 
-`getPolicy` returns a `uint8` bitmask. The three low bits are defined:
+`getPolicy` returns a `uint8` bitmask. Bits 0–2 are defined:
 
 | Bit | Flag         | Meaning                                                    |
 |-----|--------------|------------------------------------------------------------|
@@ -203,7 +203,7 @@ PAUSED and MAINTENANCE share the same policy bits but differ in the transition m
 |  1  | ALLOW_ADMIN  | Admin callers MAY enter guarded state-changing functions     |
 |  2  | ALLOW_VIEWS  | Callers MAY enter guarded view functions                     |
 
-Bits 3 through 7 are reserved for future use and MUST be returned as `0` by `getPolicy`.
+Bits 3-7 are reserved for future use and MUST be returned as `0` by `getPolicy`.
 
 The normative policy matrix is:
 
@@ -229,7 +229,7 @@ The six phases map to the lifecycle states that show up in practice: deploy → 
 
 ### Core invariant
 
-Splitting phases into stable (READY, FINALIZED, PAUSED, MAINTENANCE) and unstable (UNINITIALIZED, MUTATING) makes the invariant easy to state: the contract must be in a stable phase after every external call. MUTATING is the lock: it exists only during execution. UNINITIALIZED exists only before bootstrap completes. Neither should be observable by an external caller between transactions.
+Splitting phases into stable (READY, FINALIZED, PAUSED, MAINTENANCE) and unstable (UNINITIALIZED, MUTATING) makes the invariant easy to state: the contract must return to a stable phase before any guarded function completes. MUTATING is the lock: it exists only during execution. UNINITIALIZED exists only before bootstrap completes. Neither should be observable by an external caller between transactions.
 
 ### Bitmask
 
