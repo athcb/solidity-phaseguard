@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import { ERC20 } from "@openzeppelin/token/ERC20/ERC20.sol";
+import {ERC20} from "@openzeppelin/token/ERC20/ERC20.sol";
 
 /// @dev ERC20 that calls a hook on a target contract during `transferFrom`.
 /// Simulates ERC777-style `tokensToSend` / `tokensReceived` hooks or
 /// fee-on-transfer tokens that make external calls mid-transfer.
 contract ERC20WithTransferHook is ERC20 {
-
     address public hookTarget;
     bytes public hookData;
 
-    constructor(string memory name_, string memory symbol_)
-        ERC20(name_, symbol_)
-    {}
+    constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {}
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);

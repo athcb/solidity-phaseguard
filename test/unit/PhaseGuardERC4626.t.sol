@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import { PhaseGuardERC4626Mock } from "../mocks/PhaseGuardERC4626Mock.sol";
-import { ERC20Mock } from "../mocks/ERC20Mock.sol";
-import { ERC20WithTransferHook } from "../mocks/ERC20WithTransferHook.sol";
-import { PhaseGuard } from "../../src/PhaseGuard.sol";
-import { IPhaseGuard } from "../../src/IPhaseGuard.sol";
-import { PhaseGuardERC4626 } from "../../src/extensions/PhaseGuardERC4626.sol";
-import { Test } from "forge-std/Test.sol";
-
+import {PhaseGuardERC4626Mock} from "../mocks/PhaseGuardERC4626Mock.sol";
+import {ERC20Mock} from "../mocks/ERC20Mock.sol";
+import {ERC20WithTransferHook} from "../mocks/ERC20WithTransferHook.sol";
+import {PhaseGuard} from "../../src/PhaseGuard.sol";
+import {IPhaseGuard} from "../../src/IPhaseGuard.sol";
+import {PhaseGuardERC4626} from "../../src/extensions/PhaseGuardERC4626.sol";
+import {Test} from "forge-std/Test.sol";
 
 contract PhaseGuardERC4626Test is Test {
     PhaseGuardERC4626Mock public pgVault;
@@ -24,12 +23,12 @@ contract PhaseGuardERC4626Test is Test {
     PhaseGuard.Phase constant FINALIZED = PhaseGuard.Phase.FINALIZED;
     PhaseGuard.Phase constant PAUSED = PhaseGuard.Phase.PAUSED;
     PhaseGuard.Phase constant MAINTENANCE = PhaseGuard.Phase.MAINTENANCE;
-    
+
     // Phase array (6 phases)
     PhaseGuard.Phase[6] public phaseArray = [UNINITIALIZED, READY, MUTATING, FINALIZED, PAUSED, MAINTENANCE];
 
     // Policy bit flags (3 enforced)
-    uint8 constant ALLOW_USER  = 1 << 0;
+    uint8 constant ALLOW_USER = 1 << 0;
     uint8 constant ALLOW_ADMIN = 1 << 1;
     uint8 constant ALLOW_VIEWS = 1 << 2;
 
@@ -38,7 +37,7 @@ contract PhaseGuardERC4626Test is Test {
         asset = new ERC20Mock("My Asset", "ASSET");
         // Deploy vault with asset
         pgVault = new PhaseGuardERC4626Mock(asset);
-        
+
         owner = address(this);
         user = makeAddr("user");
 
@@ -57,7 +56,7 @@ contract PhaseGuardERC4626Test is Test {
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev PhaseGuard vault is in phase READY after deployment with the 
+    /// @dev PhaseGuard vault is in phase READY after deployment with the
     // correct underlying asset, name and symbol
     function test_VaultIsDeployedCorrectly() public view {
         assertEq(pgVault.phase(), uint8(READY));
@@ -70,19 +69,19 @@ contract PhaseGuardERC4626Test is Test {
                                 DEPOSIT
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev When a user deposits assets and receives shares the PhaseGuard events 
+    /// @dev When a user deposits assets and receives shares the PhaseGuard events
     // are correctly emitted (happy path)
     // READY -> MUTATING -> READY
     function test_DepositCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
         uint256 balanceAssetsBefore = asset.balanceOf(user);
         uint256 balanceVaultSharesBefore = pgVault.balanceOf(user);
-       
+
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
-        // 2. MUTATING -> READY 
+        // 2. MUTATING -> READY
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
@@ -90,7 +89,7 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.deposit(amount, user);
         uint256 balanceAssetsAfter = asset.balanceOf(user);
         uint256 balanceVaultSharesAfter = pgVault.balanceOf(user);
-      
+
         // Assert that `deposit` correctly transferred assets in and transferred vault shares out
         assertEq(balanceAssetsAfter, balanceAssetsBefore - amount);
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore + amount);
@@ -114,10 +113,10 @@ contract PhaseGuardERC4626Test is Test {
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore + amount);
     }
 
-    /// @dev MAINTENANCE phase: deposit should revert for non-admins 
+    /// @dev MAINTENANCE phase: deposit should revert for non-admins
     function test_DepositInMaintenanceRevertsForNonAdmins() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(MAINTENANCE);
 
@@ -129,7 +128,7 @@ contract PhaseGuardERC4626Test is Test {
     /// @dev PAUSED phase: deposit should revert
     function test_DepositInPausedReverts() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(PAUSED);
 
@@ -145,19 +144,19 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.deposit(amount, user);
     }
 
-    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so deposit reverts with `PolicyGateLocked` 
+    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so deposit reverts with `PolicyGateLocked`
     function test_DepositInFinalizedReverts() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(FINALIZED);
 
-        // Non-admin: reverts with `PolicyGateLocked` 
+        // Non-admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(user);
         pgVault.deposit(amount, user);
 
-        // Admin: reverts with `PolicyGateLocked` 
+        // Admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(owner);
         pgVault.deposit(amount, user);
@@ -174,12 +173,12 @@ contract PhaseGuardERC4626Test is Test {
         uint256 amount = 1_000;
         uint256 balanceAssetsBefore = asset.balanceOf(user);
         uint256 balanceVaultSharesBefore = pgVault.balanceOf(user);
-       
+
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
-        // 2. MUTATING -> READY 
+        // 2. MUTATING -> READY
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
@@ -187,7 +186,7 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.mint(amount, user);
         uint256 balanceAssetsAfter = asset.balanceOf(user);
         uint256 balanceVaultSharesAfter = pgVault.balanceOf(user);
-      
+
         // Assert that `mint` correctly transferred assets in and transferred vault shares out
         assertEq(balanceAssetsAfter, balanceAssetsBefore - amount);
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore + amount);
@@ -211,10 +210,10 @@ contract PhaseGuardERC4626Test is Test {
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore + amount);
     }
 
-    /// @dev MAINTENANCE phase: mint should revert for non-admins 
+    /// @dev MAINTENANCE phase: mint should revert for non-admins
     function test_MintInMaintenanceRevertsForNonAdmins() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(MAINTENANCE);
 
@@ -226,7 +225,7 @@ contract PhaseGuardERC4626Test is Test {
     /// @dev PAUSED phase: mint should revert
     function test_MintInPausedReverts() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(PAUSED);
 
@@ -242,53 +241,53 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.mint(amount, user);
     }
 
-    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so mint reverts with `PolicyGateLocked` 
+    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so mint reverts with `PolicyGateLocked`
     function test_MintInFinalizedReverts() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(FINALIZED);
 
-        // Non-admin: reverts with `PolicyGateLocked` 
+        // Non-admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(user);
         pgVault.mint(amount, user);
 
-        // Admin: reverts with `PolicyGateLocked` 
+        // Admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(owner);
         pgVault.mint(amount, user);
-    } 
+    }
 
     /*//////////////////////////////////////////////////////////////
                                 WITHDRAW
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev When a user withdraws assets and their vault shares are burned 
+    /// @dev When a user withdraws assets and their vault shares are burned
     // the PhaseGuard events are correctly emitted (happy path)
     // READY -> MUTATING -> READY
     function test_WithdrawCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
         vm.prank(user);
         pgVault.deposit(amount, user);
-       
+
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
-        // 2. MUTATING -> READY 
+        // 2. MUTATING -> READY
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         uint256 balanceAssetsBefore = asset.balanceOf(user);
         uint256 balanceVaultSharesBefore = pgVault.balanceOf(user);
-        
+
         vm.prank(user);
         pgVault.withdraw(amount, user, user);
 
         uint256 balanceAssetsAfter = asset.balanceOf(user);
         uint256 balanceVaultSharesAfter = pgVault.balanceOf(user);
-      
+
         // Assert that `withdraw` correctly transferred assets in and transferred vault shares out
         assertEq(balanceAssetsAfter, balanceAssetsBefore + amount);
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore - amount);
@@ -316,12 +315,12 @@ contract PhaseGuardERC4626Test is Test {
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore - amount);
     }
 
-    /// @dev MAINTENANCE phase: withdraw should revert for non-admins 
+    /// @dev MAINTENANCE phase: withdraw should revert for non-admins
     function test_WithdrawInMaintenanceRevertsForNonAdmins() public {
         uint256 amount = 1_000;
         vm.prank(user);
         pgVault.mint(amount, user);
-        
+
         vm.prank(owner);
         pgVault.transitionTo(MAINTENANCE);
 
@@ -335,7 +334,7 @@ contract PhaseGuardERC4626Test is Test {
         uint256 amount = 1_000;
         vm.prank(user);
         pgVault.mint(amount, user);
-        
+
         vm.prank(owner);
         pgVault.transitionTo(PAUSED);
 
@@ -351,55 +350,54 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.withdraw(amount, user, user);
     }
 
-    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so withdraw reverts with `PolicyGateLocked` 
+    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so withdraw reverts with `PolicyGateLocked`
     function test_WithdrawInFinalizedReverts() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(FINALIZED);
 
-        // Non-admin: reverts with `PolicyGateLocked` 
+        // Non-admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(user);
         pgVault.withdraw(amount, user, user);
 
-        // Admin: reverts with `PolicyGateLocked` 
+        // Admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(owner);
         pgVault.withdraw(amount, user, user);
-    } 
-    
+    }
 
     /*//////////////////////////////////////////////////////////////
                                  REDEEM
     //////////////////////////////////////////////////////////////*/
 
     // function redeem(uint256 shares, address receiver, address owner) public virtual returns (uint256) {
-    /// @dev When a user redeems shares they receive the corresponding assets, their vault shares are burned 
+    /// @dev When a user redeems shares they receive the corresponding assets, their vault shares are burned
     // the PhaseGuard events are correctly emitted (happy path)
     // READY -> MUTATING -> READY
     function test_RedeemCorrectlyEmitsEvents() public {
         uint256 amount = 1_000;
         vm.prank(user);
         pgVault.deposit(amount, user);
-       
+
         // Assert that events for the following phase transitions are emitted:
         // 1. READY -> MUTATING
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(READY), uint8(MUTATING));
-        // 2. MUTATING -> READY 
+        // 2. MUTATING -> READY
         vm.expectEmit(true, true, false, false);
         emit IPhaseGuard.PhaseTransition(uint8(MUTATING), uint8(READY));
 
         uint256 balanceAssetsBefore = asset.balanceOf(user);
         uint256 balanceVaultSharesBefore = pgVault.balanceOf(user);
-        
+
         vm.prank(user);
         pgVault.redeem(amount, user, user);
 
         uint256 balanceAssetsAfter = asset.balanceOf(user);
         uint256 balanceVaultSharesAfter = pgVault.balanceOf(user);
-      
+
         // Assert that `redeem` correctly transferred assets out and burned vault shares
         assertEq(balanceAssetsAfter, balanceAssetsBefore + amount);
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore - amount);
@@ -427,12 +425,12 @@ contract PhaseGuardERC4626Test is Test {
         assertEq(balanceVaultSharesAfter, balanceVaultSharesBefore - amount);
     }
 
-    /// @dev MAINTENANCE phase: redeem should revert for non-admins 
+    /// @dev MAINTENANCE phase: redeem should revert for non-admins
     function test_RedeemInMaintenanceRevertsForNonAdmins() public {
         uint256 amount = 1_000;
         vm.prank(user);
         pgVault.mint(amount, user);
-        
+
         vm.prank(owner);
         pgVault.transitionTo(MAINTENANCE);
 
@@ -446,7 +444,7 @@ contract PhaseGuardERC4626Test is Test {
         uint256 amount = 1_000;
         vm.prank(user);
         pgVault.mint(amount, user);
-        
+
         vm.prank(owner);
         pgVault.transitionTo(PAUSED);
 
@@ -462,30 +460,29 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.redeem(amount, user, user);
     }
 
-    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so redeem reverts with `PolicyGateLocked` 
+    /// @dev FINALIZED phase: ALLOW_USER and ALLOW_ADMIN are off so redeem reverts with `PolicyGateLocked`
     function test_RedeemInFinalizedReverts() public {
         uint256 amount = 1_000;
-        
+
         vm.prank(owner);
         pgVault.transitionTo(FINALIZED);
 
-        // Non-admin: reverts with `PolicyGateLocked` 
+        // Non-admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(user);
         pgVault.redeem(amount, user, user);
 
-        // Admin: reverts with `PolicyGateLocked` 
+        // Admin: reverts with `PolicyGateLocked`
         vm.expectRevert(PhaseGuard.PolicyGateLocked.selector);
         vm.prank(owner);
         pgVault.redeem(amount, user, user);
-    } 
-    
+    }
 
     /*//////////////////////////////////////////////////////////////
                              VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev totalAssets, totalSupply, convertToAssets, convertToShares: 
+    /// @dev totalAssets, totalSupply, convertToAssets, convertToShares:
     // should return correct value in stable phases (ALLOW_VIEWS on): READY, PAUSED, MAINTENANCE, FINALIZED
     function test_ViewFunctionsSucceedInStablePhases() public {
         // Deposit 1_000 assets to vault and mint 1_000 vault shares to user
@@ -506,7 +503,7 @@ contract PhaseGuardERC4626Test is Test {
         pgVault.transitionTo(MAINTENANCE);
         _assertViewsReturn(amount);
 
-        // FINALIZED (MAINTENANCE -> READY -> FINALIZED) 
+        // FINALIZED (MAINTENANCE -> READY -> FINALIZED)
         vm.prank(owner);
         pgVault.transitionTo(READY);
         vm.prank(owner);
@@ -514,8 +511,8 @@ contract PhaseGuardERC4626Test is Test {
         _assertViewsReturn(amount);
     }
 
-    /// @dev totalAssets, totalSupply, convertToAssets, convertToShares: 
-    // should each revert with `ViewsLocked` when called via a transfer hook 
+    /// @dev totalAssets, totalSupply, convertToAssets, convertToShares:
+    // should each revert with `ViewsLocked` when called via a transfer hook
     // during an unstable phase (ALLOW_VIEWS off): MUTATING.
     // Each iteration deploys a fresh token+vault so the hook selector is the only variable.
     function test_ViewFunctionsRevertInUnstablePhases() public {
@@ -539,8 +536,8 @@ contract PhaseGuardERC4626Test is Test {
             // Build calldata: totalAssets/totalSupply take no args, convertTo* takes uint256
             bytes memory hookData;
             if (
-                selectors[i] == PhaseGuardERC4626.convertToShares.selector || 
-                selectors[i] == PhaseGuardERC4626.convertToAssets.selector
+                selectors[i] == PhaseGuardERC4626.convertToShares.selector
+                    || selectors[i] == PhaseGuardERC4626.convertToAssets.selector
             ) {
                 hookData = abi.encodeWithSelector(selectors[i], amount);
             } else {
@@ -564,5 +561,4 @@ contract PhaseGuardERC4626Test is Test {
         assertEq(pgVault.convertToShares(amount), amount);
         assertEq(pgVault.convertToAssets(amount), amount);
     }
-
 }

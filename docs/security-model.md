@@ -17,9 +17,9 @@ It does not inspect arbitrary writes, arbitrary external calls, arithmetic corre
 
 ### 1. Regular Reentrancy
 
-Classic reentrancy occurs when a contract makes an external call before its accounting has settled, and the callee re-enters the same function to observe or exploit an inconsistent intermediate state.
+Classic reentrancy occurs when a contract makes an external call before its accounting has settled, and the callee re-enters the same function to exploit the inconsistent state.
 
-This is the class of failure associated with the DAO hack and many later callback-driven fund extraction exploits.
+This is the failure class behind the DAO hack and many later callback-driven fund-extraction exploits.
 
 In `PhaseGuard`, a guarded state-changing entry point enters `MUTATING` before user code runs. During `MUTATING`, both `ALLOW_USER` and `ALLOW_ADMIN` are disabled. A callback that tries to enter another guarded state-changing entry point reverts.
 
@@ -36,13 +36,13 @@ function withdraw(uint256 amount) external {
 }
 ```
 
-Here the external call occurs before accounting settles. With `PhaseGuard`, a guarded callback that tries to re-enter another guarded state-changing entry point during `MUTATING` reverts.
+Here the external call occurs before accounting settles. With `PhaseGuard`, a callback that tries to re-enter a guarded state-changing entry point during `MUTATING` reverts.
 
 ### 2. Read-Only Reentrancy
 
-Read-only reentrancy occurs when a protocol exposes a view during an unstable intermediate state and an external integrator relies on that stale value.
+Read-only reentrancy occurs when a view exposes unstable intermediate state and an external integrator relies on that stale value.
 
-This showed up in later DeFi incidents such as Balancer- and Curve-style stale-view or distorted-valuation patterns, where oracle-like views exposed inconsistent state during deposits, withdrawals, or rebalancing.
+This showed up in Balancer- and Curve-style exploits, where oracle-like views returned inconsistent state during deposits, withdrawals, or rebalancing.
 
 In `PhaseGuard`, `ALLOW_VIEWS` is disabled during `MUTATING`. A guarded view therefore reverts instead of exposing mid-operation state.
 
@@ -62,13 +62,13 @@ function pricePerShare() external view returns (uint256) {
 }
 ```
 
-If `pricePerShare()` is callable mid-operation, an integrator can observe distorted state. With `PhaseGuard`, a guarded public view reverts during `MUTATING`.
+If `pricePerShare()` is callable mid-operation, an integrator can observe distorted state. With `PhaseGuard`, a guarded view reverts during `MUTATING`.
 
 ### 3. Cross-Function Reentrancy
 
-Cross-function reentrancy happens when a callback does not re-enter the same function, but instead enters a different sensitive function that sees partially updated state.
+Cross-function reentrancy happens when a callback enters a different function that sees partially updated state instead of re-entering the original one.
 
-This pattern has repeatedly appeared in systems where one callback-enabled exit path leaves stale state visible to a second public function, including NFT staking and position-management reward exploits.
+This has appeared in systems where a callback-enabled exit path leaves stale state visible to a second public function, including NFT staking and reward-distribution exploits.
 
 This is covered for the same reason as regular reentrancy: during `MUTATING`, all guarded state-changing entry points are closed, not just the originating function.
 
@@ -87,17 +87,15 @@ function harvest(uint256 tokenId) external {
 }
 ```
 
-If `unstake()` triggers a callback before cleanup runs, `harvest()` can observe stale state. A guarded callback into another guarded state-changing entry point reverts during `MUTATING`.
+If `unstake()` triggers a callback before cleanup runs, `harvest()` can see stale state. A callback into a guarded state-changing entry point reverts during `MUTATING`.
 
 ### 4. Pause Bypass / Incomplete Pause Coverage
 
-Modifier-based pause systems fail when one sensitive user entry point is left unguarded.
+Modifier-based pause systems fail when one entry point is left unguarded.
 
-This is the same operational failure mode seen in incidents such as Compound Proposal 62, where an emergency pause mechanism existed but one live code path remained callable.
+This is the failure mode seen in Compound Proposal 62, where an emergency pause existed but one live code path remained callable.
 
-In `PhaseGuard`, pause behavior lives at the phase level rather than on individual functions. When the contract is in `PAUSED`, `ALLOW_USER` is disabled globally for guarded state-changing entry points.
-
-That reduces the risk of incomplete pause coverage across guarded functions.
+In `PhaseGuard`, pause behavior lives at the phase level rather than on individual functions. When the contract is in `PAUSED`, `ALLOW_USER` is disabled for all guarded state-changing entry points.
 
 **Representative example**
 
@@ -120,13 +118,13 @@ With ordinary modifier-based pause systems, one missed entry point can remain li
 
 ### 5. Uninitialized State Exposure
 
-Upgradeable or initializable systems can be deployed in a usable but uninitialized state, exposing zeroed or attacker-controlled critical variables.
+Upgradeable or initializable systems can be deployed in a usable but uninitialized state, exposing zeroed or attacker-controlled variables.
 
-This class includes high-impact initialization failures such as the Nomad bridge incident, where zeroed critical state remained externally usable.
+This includes high-impact initialization failures like the Nomad bridge incident, where zeroed critical state remained externally usable.
 
 In `PhaseGuard`, public operation remains blocked while the contract is in `UNINITIALIZED`. Bootstrap requires `_phaseGuardInit()` to move the contract to `READY`. If that step is omitted, guarded entry stays blocked and the contract is effectively bricked.
 
-This is fail-closed initialization, not automatic deployment-time initialization.
+This is fail-closed entry blocking, not automatic deployment-time initialization. PhaseGuard does not replace proxy initialization mechanisms like OpenZeppelin `Initializable`, which ensure critical state is set exactly once. The two work together: `Initializable` gates the setup function itself, while PhaseGuard's `UNINITIALIZED` phase blocks guarded public entry until bootstrap completes. Combined, a contract gets one-shot state initialization and fail-closed entry protection.
 
 **Representative example**
 
@@ -145,19 +143,19 @@ contract Replica {
 }
 ```
 
-If bootstrap never completes, zeroed critical state can remain exposed. In `PhaseGuard`, guarded public operation remains blocked while the contract stays in `UNINITIALIZED`.
+If bootstrap never completes, zeroed critical state can remain exposed. In `PhaseGuard`, guarded public operation remains blocked while the contract stays in `UNINITIALIZED`. In proxy-upgradeable contexts, this complements `Initializable` by adding a fail-closed entry barrier that persists until bootstrap succeeds.
 
-## Why the Model Helps
+## Summary
 
-The current design targets a set of failures that still shows up regularly in production systems:
+The current design targets failures that still show up regularly in production:
 
 - fragmented modifier application
 - state exposure during callbacks
 - lifecycle drift between bootstrap, normal operation, pause, maintenance, and shutdown
 
-The main advantage is centralization. Instead of relying on each function to carry its own local safety modifiers, guarded entry points share the same lifecycle and the same policy matrix.
+The main advantage is centralization. Instead of each function carrying its own safety modifiers, guarded entry points share the same lifecycle and the same policy matrix.
 
-The same mechanism also provides two operational properties that are not themselves exploit classes:
+The same mechanism also provides two operational properties that are not exploit classes themselves:
 
-- `MAINTENANCE` keeps guarded user entry closed while leaving guarded admin entry available. That allows admin-only maintenance without reopening the full public surface.
-- `FINALIZED` provides a terminal, view-only resting state. Once reached, the transition matrix does not allow reopening operational phases. That is stronger than an ordinary pause system, which is usually meant for temporary suspension rather than irreversible shutdown.
+- `MAINTENANCE` keeps guarded user entry closed while leaving admin entry available, allowing admin-only work without reopening the full public surface.
+- `FINALIZED` is a terminal, view-only state. Once reached, the transition matrix blocks all reopening. This is stronger than a pause, which is usually temporary.

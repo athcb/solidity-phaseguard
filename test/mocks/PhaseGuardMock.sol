@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.30; 
+pragma solidity 0.8.30;
 
-import { PhaseGuard } from "../../src/PhaseGuard.sol";
+import {PhaseGuard} from "../../src/PhaseGuard.sol";
 
 /// @dev PhaseGuard implementation that exposes internal functions for unit testing.
 contract PhaseGuardMock is PhaseGuard {
-
     address public owner;
     uint256 public counter;
 
@@ -18,7 +17,7 @@ contract PhaseGuardMock is PhaseGuard {
         _phaseGuardInit();
     }
 
-    // Override for access control 
+    // Override for access control
     function _checkAdmin() internal view override {
         if (msg.sender != owner) revert AccessDenied();
     }
@@ -28,7 +27,7 @@ contract PhaseGuardMock is PhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     function dummyMutating() external withMutating {
-        counter += 1;   
+        counter += 1;
     }
 
     function dummyView() external view withView returns (uint256) {
@@ -77,5 +76,4 @@ contract PhaseGuardMock is PhaseGuard {
         assembly { length := sload(stackLengthSlot) }
         return length;
     }
-
 }

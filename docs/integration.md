@@ -56,7 +56,7 @@ function pricePerShare() external view withView returns (uint256) {
 }
 ```
 
-The default should be to wrap the full external/public view surface with `withView` and keep the underlying read logic in internal helpers. That avoids exposing unstable state through unguarded public getters and removes per-function guesswork.
+The default should be to wrap the full external/public view surface with `withView` and keep the read logic in internal helpers. That avoids exposing unstable state through unguarded public getters.
 
 Because `withView` blocks guarded views during `MUTATING`, state-changing functions should not call those guarded external/public views. Use a split-view pattern instead:
 

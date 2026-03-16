@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import { PhaseGuardMock } from "./PhaseGuardMock.sol";
+import {PhaseGuardMock} from "./PhaseGuardMock.sol";
 
 /// @dev Simulates an ERC721 receiver that returns the expected selector on callback.
 /// Represents the legitimate `onERC721Received` pattern: receive token, return selector, done.
@@ -18,7 +18,8 @@ contract ERC721Receiver {
 /// @dev Simulates an ERC1155 receiver that returns the expected selector on callback.
 /// Represents the legitimate `onERC1155Received` pattern.
 contract ERC1155Receiver {
-    bytes4 public constant ERC1155_RECEIVED = bytes4(keccak256("onERC1155Received(address,address,uint256,uint256,bytes)"));
+    bytes4 public constant ERC1155_RECEIVED =
+        bytes4(keccak256("onERC1155Received(address,address,uint256,uint256,bytes)"));
     bool public called;
 
     function onERC1155Received(address, address, uint256, uint256, bytes calldata) external returns (bytes4) {
@@ -67,7 +68,10 @@ contract FlashLoanBorrower {
 /// Used to prove that views and mutating calls are blocked during MUTATING.
 contract MaliciousCallbackReceiver {
     PhaseGuardMock public target;
-    enum AttackType { VIEW, MUTATING }
+    enum AttackType {
+        VIEW,
+        MUTATING
+    }
     AttackType public attackType;
 
     constructor(address _target) {

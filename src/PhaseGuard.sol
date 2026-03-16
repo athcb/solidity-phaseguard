@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import { IPhaseGuard } from "./IPhaseGuard.sol";
+import {IPhaseGuard} from "./IPhaseGuard.sol";
 
 /// @title PhaseGuard State Machine
 /// @author 0xathcb
 /// @notice PhaseGuard eliminates lifecycle security vulnerabilities by enforcing a rigid state machine for every contract call.
-/// It uses a unified guard to guarantee that initialization, CEI compliance, pause logic, and context integrity 
+/// It uses a unified guard to guarantee that initialization, CEI compliance, pause logic, and context integrity
 /// follow a strict order making reentrancy, re-initialization, and inconsistent state exploits structurally impossible.
 /// @dev Abstract contract implementing a stack-based Finite State Machine (FSM).
 /// 1. Call `_phaseGuardInit()` during initialization (Constructor or Proxy Init).
@@ -14,7 +14,6 @@ import { IPhaseGuard } from "./IPhaseGuard.sol";
 /// 3. Apply the `withMutating` modifier to all external state-changing functions.
 /// 4. Apply the `withView` modifier to all external view functions.
 abstract contract PhaseGuard is IPhaseGuard {
-
     /*//////////////////////////////////////////////////////////////
                                  TYPES
     //////////////////////////////////////////////////////////////*/
@@ -54,7 +53,7 @@ abstract contract PhaseGuard is IPhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Allow inbound non-admin callers: bit 0
-    uint8 internal constant ALLOW_USER = 1 << 0; 
+    uint8 internal constant ALLOW_USER = 1 << 0;
     /// @dev Allow inbound admin callers: bit 1
     uint8 internal constant ALLOW_ADMIN = 1 << 1;
     /// @dev Allow access to view functions: bit 2
@@ -66,32 +65,31 @@ abstract contract PhaseGuard is IPhaseGuard {
     // uint8 internal constant RESERVED_6 = 1 << 6;
     // uint8 internal constant RESERVED_7 = 1 << 7;
 
-
     /*//////////////////////////////////////////////////////////////
                              CUSTOM ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Thrown when the required entry policy is not met when entering a new phase. 
+    /// @notice Thrown when the required entry policy is not met when entering a new phase.
     error PolicyGateLocked();
-    
+
     /// @notice Thrown when the phase transition is not allowed based on the transition matrix.
     error TransitionGateLocked();
-    
-    /// @notice Thrown when the array size of `_phaseStack` is inconsistent with what is expected. 
+
+    /// @notice Thrown when the array size of `_phaseStack` is inconsistent with what is expected.
     error StackSizeError();
 
     /// @notice Thrown when the global contract phase is not the same as the sole stack element.
     error StackInconsistencyError();
 
-    /// @notice Thrown when entry to a view function is blocked. 
+    /// @notice Thrown when entry to a view function is blocked.
     error ViewsLocked();
 
     /// @notice Thrown when the contract remains in an unstable phase at the end of a transaction.
     error PhaseStabilityInvariant();
-    
+
     /// @notice Thrown when the stack contains residual states (length != 1) at the end of a transaction.
     error StackLengthInvariant();
-    
+
     /// @notice Thrown when the global phase does not match the resting stack state.
     error StackStateInvariant();
 
@@ -101,7 +99,7 @@ abstract contract PhaseGuard is IPhaseGuard {
 
     /// @notice Bootstraps the contract from UNINITIALIZED to READY.
     /// @dev Must be called during the constructor or proxy `initialize` otherwise the contract will be bricked.
-    /// Ensures atomic initialization. 
+    /// Ensures atomic initialization.
     ///
     /// Example with a constructor:
     /// ```solidity
@@ -115,24 +113,24 @@ abstract contract PhaseGuard is IPhaseGuard {
     /// constructor() {
     ///     _disableInitializers(); // disable initializers in the implementation
     /// }
-    /// 
+    ///
     /// function initialize() external initializer {
     ///     __Ownable_init(msg.sender);
     ///     _phaseGuardInit();
     /// }
     /// ```
-    /// 
+    ///
     /// @custom:error `TransitionGateLocked()` if the current phase is not `UNINITIALIZED`: initialization can only occur once.
     /// @custom:error `StackSizeError()` if the `_phaseStack` is not empty.
     function _phaseGuardInit() internal {
         PhaseGuardStorage storage $ = _getStorage();
-        if($._phase != Phase.UNINITIALIZED) {
+        if ($._phase != Phase.UNINITIALIZED) {
             revert TransitionGateLocked();
         }
 
         $._phase = Phase.READY;
         // Unreachable error under normal circumstances but added for defense-in-depth:
-        if($._phaseStack.length != 0) revert StackSizeError();
+        if ($._phaseStack.length != 0) revert StackSizeError();
         $._phaseStack.push($._phase);
         emit PhaseTransition(uint8(Phase.UNINITIALIZED), uint8(Phase.READY));
     }
@@ -140,7 +138,7 @@ abstract contract PhaseGuard is IPhaseGuard {
     /*//////////////////////////////////////////////////////////////
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
-    
+
     /// @notice Top-level entry point for state-changing functions.
     /// @dev Wraps the function body to enforce the MUTATING phase lifecycle:
     /// 1. `_withMutatingBefore()`: Validates permissions, checks invariants, and enters phase.
@@ -155,8 +153,8 @@ abstract contract PhaseGuard is IPhaseGuard {
 
     /// @notice Top-level entry point for view functions.
     /// @dev Allows access to view functions only in phases where ALLOW_VIEWS is enabled.
-    /// Should be used in all external / public view functions. 
-    /// View functions without the modifier should be internal helpers. 
+    /// Should be used in all external / public view functions.
+    /// View functions without the modifier should be internal helpers.
     modifier withView() {
         _withView();
         _;
@@ -167,13 +165,13 @@ abstract contract PhaseGuard is IPhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Admin protected function that transitions the global phase.
-    /// @dev Protected by _checkAdmin(). 
+    /// @dev Protected by _checkAdmin().
     /// Does not allow transitioning to an unstable state (invariant check).
     /// Does not allow transitioning while operations are ongoing (invariant check).
     /// Enforces Stable fromPhase -> Stable toPhase.
     /// @param toPhase phase being entered.
     /// @custom:error `TransitionGateLocked()` if the forward path is invalid in the matrix.
-    function transitionTo(Phase toPhase) external virtual {
+    function transitionTo(Phase toPhase) external {
         _checkAdmin();
         _checkInvariants();
 
@@ -181,12 +179,12 @@ abstract contract PhaseGuard is IPhaseGuard {
         Phase currentPhase = $._phase;
 
         // Fail early: avoids wasting gas on SSTOREs that would be reverted by _checkInvariants().
-        if(!isStable(uint8(toPhase))) revert PhaseStabilityInvariant();
+        if (!isStable(uint8(toPhase))) revert PhaseStabilityInvariant();
 
         // Transition Gate
         bool isAllowed = isTransitionAllowed(uint8(currentPhase), uint8(toPhase));
-        if(!isAllowed) revert TransitionGateLocked();
-        
+        if (!isAllowed) revert TransitionGateLocked();
+
         // State update
         $._phase = toPhase;
         $._phaseStack[0] = toPhase;
@@ -225,10 +223,11 @@ abstract contract PhaseGuard is IPhaseGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice ERC-165 interface detection.
+    /// @dev Virtual so subclasses can add support for additional interfaces via super.supportsInterface.
     /// @param interfaceId The interface identifier to check.
-    /// @return True if `interfaceId` is `0x01ffc9a7` (ERC-165) or `0x90e42898` (IPhaseGuard).
+    /// @return True if `interfaceId` is `0x01ffc9a7` (ERC-165) or `0x5ae3f743` (IPhaseGuard).
     function supportsInterface(bytes4 interfaceId) public pure virtual returns (bool) {
-        return interfaceId == 0x01ffc9a7 || interfaceId == 0x90e42898;
+        return interfaceId == 0x01ffc9a7 || interfaceId == 0x5ae3f743;
     }
 
     /// @notice Evaluates whether a forward transition from one phase to another is allowed in the transition matrix.
@@ -236,23 +235,20 @@ abstract contract PhaseGuard is IPhaseGuard {
     /// implicitly by `_exitPhase` which restores the previous phase from the stack.
     /// @param from Phase being exited.
     /// @param  to Phase being entered.
-    /// @return true if the transition is allowed and false otherwise. 
+    /// @return true if the transition is allowed and false otherwise.
     function isTransitionAllowed(uint8 from, uint8 to) public pure returns (bool) {
-        if(from > uint8(type(Phase).max) || to > uint8(type(Phase).max)) return false;
+        if (from > uint8(type(Phase).max) || to > uint8(type(Phase).max)) return false;
         Phase f = Phase(from);
         Phase t = Phase(to);
 
         // UNINITIALIZED (Phase ID 0) Transitions
-        if(f == Phase.UNINITIALIZED) {
-            return t == Phase.READY; 
+        if (f == Phase.UNINITIALIZED) {
+            return t == Phase.READY;
         }
 
         // READY (Phase ID 1) Transitions
-        if(f == Phase.READY) {
-            return t == Phase.MUTATING || 
-                   t == Phase.FINALIZED || 
-                   t == Phase.PAUSED || 
-                   t == Phase.MAINTENANCE; 
+        if (f == Phase.READY) {
+            return t == Phase.MUTATING || t == Phase.FINALIZED || t == Phase.PAUSED || t == Phase.MAINTENANCE;
         }
 
         // MUTATING (Phase ID 2): No forward transitions.
@@ -261,32 +257,26 @@ abstract contract PhaseGuard is IPhaseGuard {
         // FINALIZED (Phase ID 3): Terminal state, no transitions allowed.
 
         // PAUSED (Phase ID 4) Transitions
-        if(f == Phase.PAUSED) {
-            return t == Phase.READY || 
-                   t == Phase.MAINTENANCE || 
-                   t == Phase.FINALIZED; 
+        if (f == Phase.PAUSED) {
+            return t == Phase.READY || t == Phase.MAINTENANCE || t == Phase.FINALIZED;
         }
 
         // MAINTENANCE (Phase ID 5) Transitions
-        if(f == Phase.MAINTENANCE) {
-            return t == Phase.READY || 
-                   t == Phase.MUTATING; 
+        if (f == Phase.MAINTENANCE) {
+            return t == Phase.READY || t == Phase.MUTATING;
         }
 
         return false;
     }
 
-    /// @notice Checks whether a given phase is stable or unstable. 
-    /// @dev Contract state MUST both start and end in a stable state when functions are entered or return. 
+    /// @notice Checks whether a given phase is stable or unstable.
+    /// @dev Contract state MUST both start and end in a stable state when functions are entered or return.
     /// @param phase_ Phase whose stability is being checked.
     /// @return true if given phase is stable.
     function isStable(uint8 phase_) public pure returns (bool) {
-        if(phase_ > uint8(type(Phase).max)) return false;
+        if (phase_ > uint8(type(Phase).max)) return false;
         Phase p = Phase(phase_);
-        return p == Phase.READY || 
-               p == Phase.FINALIZED ||
-               p == Phase.PAUSED ||
-               p == Phase.MAINTENANCE;
+        return p == Phase.READY || p == Phase.FINALIZED || p == Phase.PAUSED || p == Phase.MAINTENANCE;
     }
 
     /// @notice Returns policy bitmask for a given phase.
@@ -294,40 +284,39 @@ abstract contract PhaseGuard is IPhaseGuard {
     /// @param phase_ Phase whose policy is being fetched.
     /// @return uint8 policy of the given phase.
     function getPolicy(uint8 phase_) public pure returns (uint8) {
-        if(phase_ > uint8(type(Phase).max)) return 0;
+        if (phase_ > uint8(type(Phase).max)) return 0;
         Phase p = Phase(phase_);
 
         // UNINITIALIZED (Phase ID 0) policy
-        if(p == Phase.UNINITIALIZED) return 0; 
+        if (p == Phase.UNINITIALIZED) return 0;
 
         // READY (Phase ID 1) policy
-        if(p == Phase.READY) {
+        if (p == Phase.READY) {
             return ALLOW_USER | ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // MUTATING (Phase ID 2) policy
-        if(p == Phase.MUTATING) {
+        if (p == Phase.MUTATING) {
             return 0;
         }
 
         // FINALIZED (Phase ID 3) policy
-        if(p == Phase.FINALIZED) {
+        if (p == Phase.FINALIZED) {
             return ALLOW_VIEWS;
         }
 
         // PAUSED (Phase ID 4) policy
-        if(p == Phase.PAUSED) {
+        if (p == Phase.PAUSED) {
             return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         // MAINTENANCE (Phase ID 5) policy
-        if(p == Phase.MAINTENANCE) {
+        if (p == Phase.MAINTENANCE) {
             return ALLOW_ADMIN | ALLOW_VIEWS;
         }
 
         return 0;
     }
-    
 
     /*//////////////////////////////////////////////////////////////
                            INTERNAL FUNCTIONS / ACCESS CONTROL
@@ -335,16 +324,16 @@ abstract contract PhaseGuard is IPhaseGuard {
 
     /// @notice Admin access control hook. Must revert if `msg.sender` is not authorized.
     /// @dev Must be overridden in inherited contracts.
-    /// Used internally by PhaseGuard to gate phase entry. 
+    /// Used internally by PhaseGuard to gate phase entry.
     /// Do NOT use for per-function access control: use OZ `onlyOwner()` or `onlyRole()` directly on the function instead.
-    /// 
+    ///
     /// Example using OZ Ownable:
     /// ```solidity
     /// function _checkAdmin() internal view override {
     ///     if(msg.sender != owner()) revert AccessDenied(msg.sender);
     /// }
     /// ```
-    /// 
+    ///
     /// Example using OZ AccessControl:
     /// ```solidity
     /// function _checkAdmin() internal view override {
@@ -370,8 +359,8 @@ abstract contract PhaseGuard is IPhaseGuard {
 
         // Transition Gate: Check if transition is allowed in the transition matrix.
         bool isAllowed = isTransitionAllowed(uint8(currentPhase), uint8(toPhase));
-        if(!isAllowed) revert TransitionGateLocked();
-        
+        if (!isAllowed) revert TransitionGateLocked();
+
         // State update
         $._phase = toPhase;
         $._phaseStack.push(toPhase);
@@ -386,15 +375,15 @@ abstract contract PhaseGuard is IPhaseGuard {
     function _exitPhase() private {
         PhaseGuardStorage storage $ = _getStorage();
 
-        // Stack size check: stack should contain at least the current and previous phases for _exitPhase to work. 
+        // Stack size check: stack should contain at least the current and previous phases for _exitPhase to work.
         uint256 stackSize = $._phaseStack.length;
-        if(stackSize < 2) revert StackSizeError();
+        if (stackSize < 2) revert StackSizeError();
 
         // Phase at top of the stack should be the same as global phase:
         // Unreachable under normal execution (`_phase` is always kept in sync with the stack top)
         // but kept as defense-in-depth as it guards against raw storage corruption.
         Phase fromPhase = $._phaseStack[stackSize - 1];
-        if(fromPhase != $._phase) revert StackInconsistencyError();
+        if (fromPhase != $._phase) revert StackInconsistencyError();
 
         // Get previous phase from stack.
         Phase toPhase = $._phaseStack[stackSize - 2];
@@ -418,12 +407,12 @@ abstract contract PhaseGuard is IPhaseGuard {
     function _checkInvariants() private view {
         PhaseGuardStorage storage $ = _getStorage();
         Phase currentPhase = $._phase;
-        if(!isStable(uint8(currentPhase))) revert PhaseStabilityInvariant();
+        if (!isStable(uint8(currentPhase))) revert PhaseStabilityInvariant();
         // The following two checks are defense-in-depth: under correct usage the
         // stability check above will catch misuse first, because unstable phases
         // are always pushed/popped together with the stack.
-        if($._phaseStack.length != 1) revert StackLengthInvariant();
-        if(currentPhase != $._phaseStack[0]) revert StackStateInvariant();
+        if ($._phaseStack.length != 1) revert StackLengthInvariant();
+        if (currentPhase != $._phaseStack[0]) revert StackStateInvariant();
     }
 
     /// @notice Pre-execution guard logic for the Mutating modifier.
@@ -436,7 +425,7 @@ abstract contract PhaseGuard is IPhaseGuard {
     /// 3. Calls `_enterPhase` to transition to `Phase.MUTATING`.
     function _withMutatingBefore() private {
         _checkInvariants();
-        
+
         Phase currentPhase = _getStorage()._phase;
         uint8 currentPolicy = getPolicy(uint8(currentPhase));
 
@@ -445,7 +434,7 @@ abstract contract PhaseGuard is IPhaseGuard {
         bool isAdminAllowed = (currentPolicy & ALLOW_ADMIN) != 0;
 
         // Pass if isUserAllowed == true
-        if(!isUserAllowed) {
+        if (!isUserAllowed) {
             if (isAdminAllowed) {
                 // If only admin entry is allowed check access rights (reverts if not admin):
                 _checkAdmin();
@@ -454,7 +443,7 @@ abstract contract PhaseGuard is IPhaseGuard {
                 revert PolicyGateLocked();
             }
         }
-        
+
         // Enter MUTATING phase. The transition gate inside `_enterPhase` enforces
         // that only READY and MAINTENANCE can reach MUTATING. PAUSED has ALLOW_ADMIN
         // but PAUSED -> MUTATING is blocked by the transition matrix.
@@ -472,7 +461,7 @@ abstract contract PhaseGuard is IPhaseGuard {
 
     /// @dev Internal helper for `withView`. Wraps logic to reduce bytecode size.
     function _withView() private view {
-        if( (getPolicy(uint8(_getStorage()._phase)) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
+        if ((getPolicy(uint8(_getStorage()._phase)) & ALLOW_VIEWS) != ALLOW_VIEWS) revert ViewsLocked();
     }
 
     /// @dev Returns a pointer to the ERC-7201 namespaced storage struct.
@@ -482,5 +471,4 @@ abstract contract PhaseGuard is IPhaseGuard {
             $.slot := slot
         }
     }
-
 }

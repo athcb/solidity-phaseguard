@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import { PhaseGuard } from "../PhaseGuard.sol";
-import { ERC20 } from "@openzeppelin/token/ERC20/ERC20.sol";
-import { IERC20 } from "@openzeppelin/token/ERC20/IERC20.sol";
-import { ERC4626 } from "@openzeppelin/token/ERC20/extensions/ERC4626.sol";
-import { Math } from "@openzeppelin/utils/math/Math.sol";
+import {PhaseGuard} from "../PhaseGuard.sol";
+import {ERC20} from "@openzeppelin/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
+import {ERC4626} from "@openzeppelin/token/ERC20/extensions/ERC4626.sol";
+import {Math} from "@openzeppelin/utils/math/Math.sol";
 
 /// @title PhaseGuardERC4626
 /// @author 0xathcb
@@ -19,7 +19,7 @@ import { Math } from "@openzeppelin/utils/math/Math.sol";
 /// Usage:
 /// ```solidity
 /// contract ExampleVault is PhaseGuardERC4626 {
-///     constructor(IERC20 asset) 
+///     constructor(IERC20 asset)
 ///         ERC4626(asset)
 ///         ERC20("Vault Share Name", "SYMBOL")
 ///     {
@@ -46,17 +46,29 @@ abstract contract PhaseGuardERC4626 is ERC4626, PhaseGuard {
         return super.mint(shares, receiver);
     }
 
-    function withdraw(uint256 assets, address receiver, address _owner) public virtual override withMutating returns (uint256) {
+    function withdraw(uint256 assets, address receiver, address _owner)
+        public
+        virtual
+        override
+        withMutating
+        returns (uint256)
+    {
         return super.withdraw(assets, receiver, _owner);
     }
 
-    function redeem(uint256 shares, address receiver, address _owner) public virtual override withMutating returns (uint256) {
+    function redeem(uint256 shares, address receiver, address _owner)
+        public
+        virtual
+        override
+        withMutating
+        returns (uint256)
+    {
         return super.redeem(shares, receiver, _owner);
     }
-   
+
     /*//////////////////////////////////////////////////////////////
-        PUBLIC VIEW FUNCTIONS: withView 
-        Guard against read-only reentrancy. 
+        PUBLIC VIEW FUNCTIONS: withView
+        Guard against read-only reentrancy.
     //////////////////////////////////////////////////////////////*/
 
     function totalAssets() public view virtual override withView returns (uint256) {
@@ -66,7 +78,7 @@ abstract contract PhaseGuardERC4626 is ERC4626, PhaseGuard {
     function totalSupply() public view virtual override(ERC20, IERC20) withView returns (uint256) {
         return _totalSupply();
     }
-    
+
     function convertToShares(uint256 assets) public view virtual override withView returns (uint256) {
         return _convertToShares(assets, Math.Rounding.Floor);
     }
@@ -80,13 +92,13 @@ abstract contract PhaseGuardERC4626 is ERC4626, PhaseGuard {
         Used internally for share math to avoid triggering
         withView during deposit / mint / withdraw / redeem.
     //////////////////////////////////////////////////////////////*/
-    
+
     /// @dev Unguarded total assets helper.
     function _totalAssets() internal view virtual returns (uint256) {
         return IERC20(asset()).balanceOf(address(this));
     }
 
-    /// @dev Unguarded total supply helper. 
+    /// @dev Unguarded total supply helper.
     /// Calls `super.totalSupply()` to bypass the `withView` guard on the public `totalSupply()` override.
     function _totalSupply() internal view virtual returns (uint256) {
         return super.totalSupply();
@@ -101,5 +113,4 @@ abstract contract PhaseGuardERC4626 is ERC4626, PhaseGuard {
     function _convertToShares(uint256 assets, Math.Rounding rounding) internal view virtual override returns (uint256) {
         return assets.mulDiv(_totalSupply() + 10 ** _decimalsOffset(), _totalAssets() + 1, rounding);
     }
-
 }
