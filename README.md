@@ -1,19 +1,18 @@
-
 # PhaseGuard
 
 ## Abstract
 
-A standard interface for smart contracts that manage their lifecycle through a finite state machine. A conforming contract exposes its current phase, a per-phase access-policy bitmask, and a transition-legality check through three read functions and one event. All guarded entry points share a single 6-phase transition matrix, so lifecycle protection is enforced at the phase level rather than per-function.
+A standard interface for smart contracts that manage their lifecycle through a finite state machine. A conforming contract exposes its current phase, a per-phase access-policy bitmask, and a transition-legality check through three read functions and one event. All guarded entry points share a single 6-phase transition matrix, so lifecycle protection is applied at the phase level rather than per-function.
 
 ## Motivation
 
-Smart contract lifecycle protection is typically assembled from independent mechanisms: reentrancy guards, pause switches, and initialization guards. Each mechanism must be applied correctly to every relevant entry point, and there is no shared model that links them or enforces consistency across the public surface.
+Smart contract lifecycle protection is typically assembled from independent mechanisms: reentrancy guards, pause switches, and initialization guards. Each must be applied correctly to every relevant entry point, and nothing links them or enforces consistency across the contract's public surface.
 
 That per-function approach keeps producing the same exploit classes: reentrancy (including read-only and cross-function variants), incomplete pause coverage, and uninitialized state exposure. See Security Considerations for a detailed mapping of each class to the phase model.
 
-No existing ERC defines a common interface for contract lifecycle state. Existing patterns address individual concerns, but they expose only isolated, implementation-specific signals. A contract may expose `paused()`, but there is no standard interface that lets an external caller reason uniformly about bootstrap state, in-flight mutation, maintenance mode, terminal finalization, and transition legality across implementations.
+No existing ERC defines a common interface for contract lifecycle state. Existing patterns address individual concerns, but expose only isolated, implementation-specific signals. A contract may expose `paused()`, but there is no standard way for an external caller to query bootstrap state, in-flight mutation, maintenance mode, terminal finalization, or transition legality.
 
-A standard interface would let composing contracts check a dependency's lifecycle phase before routing funds or executing a governance action. For instance, a contract could avoid calling a dependency while it is MUTATING, a timelock could verify a target is in READY before executing a queued proposal, and a monitoring system could watch for phase changes across any conforming contract without per-protocol adapters.
+A standard interface would let composing contracts check a dependency's lifecycle phase before routing funds or executing a governance action. A contract could avoid calling a dependency while it is MUTATING, a timelock could verify a target is in READY before executing a queued proposal, and a monitoring system could watch for phase changes across any conforming contract without per-protocol adapters.
 
 ## Specification
 
@@ -42,6 +41,8 @@ interface IPhaseGuard /* is ERC165 */ {
     function getPolicy(uint8 phase_) external pure returns (uint8);
 
     function isTransitionAllowed(uint8 from, uint8 to) external pure returns (bool);
+
+    function isStable(uint8 phase_) external pure returns (bool);
 }
 ```
 
@@ -104,6 +105,25 @@ MUST return `true` if and only if the transition is in the normative matrix.
       type: bool
 ```
 
+##### `isStable`
+
+Returns whether a given phase is stable or unstable.
+
+MUST return `true` for READY, FINALIZED, PAUSED, and MAINTENANCE. MUST return `false` for UNINITIALIZED, MUTATING, and any value greater than `5`.
+
+```yaml
+- name: isStable
+  type: function
+  stateMutability: pure
+
+  inputs:
+    - name: phase_
+      type: uint8
+  outputs:
+    - name: stable
+      type: bool
+```
+
 #### Events
 
 ##### `PhaseTransition`
@@ -127,13 +147,14 @@ MUST be emitted every time the global phase changes.
 
 A conforming contract MUST implement ERC-165 and return `true` for the `IPhaseGuard` interface identifier.
 
-The interface ID is `0x90e42898`, computed as the XOR of:
+The interface ID is `0x5ae3f743`, computed as the XOR of:
 
 ```
 bytes4(keccak256("phase()"))                          = 0xb1c9fe6e
 bytes4(keccak256("getPolicy(uint8)"))                 = 0x04f08b55
 bytes4(keccak256("isTransitionAllowed(uint8,uint8)")) = 0x25dd5da3
-                                                  XOR = 0x90e42898
+bytes4(keccak256("isStable(uint8)"))                  = 0xca07dfdb
+                                                  XOR = 0x5ae3f743
 ```
 
 ### Phases
@@ -204,7 +225,7 @@ The following security-critical consequences are called out explicitly:
 
 ### Phases
 
-The six phases map directly to the lifecycle states that show up in practice: deploy → operate → pause / maintain → shut down, with a transient lock state for mid-operation exclusion. Fewer phases would collapse distinct operational needs (PAUSED and MAINTENANCE differ in the transition matrix — MAINTENANCE allows MUTATING, PAUSED does not). More phases would push application-specific concerns into the standard. Six is the minimal set that covers the exploit classes listed in Motivation while keeping the transition matrix minimal enough.
+The six phases map to the lifecycle states that show up in practice: deploy → operate → pause / maintain → shut down, with a transient lock state for mid-operation exclusion. Fewer phases would collapse distinct operational needs (PAUSED and MAINTENANCE differ in the transition matrix — MAINTENANCE allows MUTATING, PAUSED does not). More phases would push application-specific concerns into the standard. Six is the minimal set that covers the exploit classes listed in Motivation while keeping the transition matrix small.
 
 ### Core invariant
 
@@ -226,6 +247,8 @@ PhaseGuard addresses the following exploit classes for guarded entry points:
 | Pause bypass | One entry point misses `whenNotPaused`, leaving a live code path during an emergency (Compound Proposal 62). | Phase-level policy closes all guarded user entry in `PAUSED`. |
 | Uninitialized state exposure | A contract is externally usable before critical state is set. The Nomad bridge exploit relied on zeroed state that was never initialized. | Guarded entry remains blocked in `UNINITIALIZED`. |
 
+The `UNINITIALIZED` phase provides fail-closed entry blocking, not proxy initialization. It does not replace mechanisms like OpenZeppelin `Initializable`, which ensure critical state is set exactly once. The two work together: `Initializable` gates the setup function, while `UNINITIALIZED` blocks guarded public entry until bootstrap completes.
+
 `MAINTENANCE` gives admins an operating window with guarded user entry closed. `FINALIZED` is a terminal, view-only state with no further transitions.
 
 ### Coverage boundary
@@ -234,9 +257,17 @@ PhaseGuard is a lifecycle and guarded-entry primitive. It does not address oracl
 
 The protection applies only to entry points that carry the guard modifiers. Any external or public function that omits the modifier is outside the phase model and will not be blocked by phase transitions.
 
+### Split-view pattern
+
+Because guarded views revert during MUTATING, state-changing functions that need to read state MUST NOT call guarded external or public views. Implementations that override view functions from other ERCs (e.g., ERC-4626's `totalAssets`) should use a split-view pattern: a guarded public view for the external interface, and an unguarded internal helper for read logic shared with mutating code.
+
 ### Admin trust assumption
 
 Phase transitions between stable phases (READY, PAUSED, MAINTENANCE, FINALIZED) are controlled by admin-gated functions. The security model assumes a trusted or governance-controlled admin. A compromised admin key can move the contract to PAUSED or FINALIZED at will.
+
+### `_checkAdmin` implementation requirement
+
+Implementers MUST override `_checkAdmin()` so that it reverts for unauthorized callers. An empty `_checkAdmin()` makes all callers admins, which effectively disables phase-based access control for stable-phase transitions and admin-gated entry during PAUSED and MAINTENANCE. Implementers SHOULD connect `_checkAdmin()` to their existing access-control system (e.g., `Ownable`, `AccessControl`).
 
 Representative examples are documented in [`docs/security-model.md`](docs/security-model.md).
 
@@ -266,7 +297,7 @@ abstract contract PhaseGuard is IPhaseGuard {
     }
 
     function supportsInterface(bytes4 interfaceId) public pure virtual returns (bool) {
-        return interfaceId == 0x01ffc9a7 || interfaceId == 0x90e42898;
+        return interfaceId == 0x01ffc9a7 || interfaceId == 0x5ae3f743;
     }
 
     function isTransitionAllowed(uint8 from, uint8 to) public pure returns (bool) {
@@ -285,6 +316,11 @@ abstract contract PhaseGuard is IPhaseGuard {
         // PAUSED        -> ALLOW_ADMIN | ALLOW_VIEWS
         // MAINTENANCE   -> ALLOW_ADMIN | ALLOW_VIEWS
     }
+
+    function isStable(uint8 phase_) public pure returns (bool) {
+        // READY, FINALIZED, PAUSED, MAINTENANCE -> true
+        // UNINITIALIZED, MUTATING, out-of-range -> false
+    }
 }
 ```
 
@@ -297,7 +333,7 @@ The full test suite is in [`test/unit/PhaseGuard.t.sol`](test/unit/PhaseGuard.t.
 - `phase()` returns READY after bootstrap; returns MUTATING during a guarded call.
 - Every cell in the 6 × 6 transition matrix is tested against `isTransitionAllowed`.
 - `getPolicy` returns `0` for UNINITIALIZED and MUTATING; returns ALLOW_USER as `0` for PAUSED.
-- `supportsInterface` returns `true` for `0x01ffc9a7` (ERC-165) and `0x90e42898` (IPhaseGuard), `false` for `0xffffffff`.
+- `supportsInterface` returns `true` for `0x01ffc9a7` (ERC-165) and `0x5ae3f743` (IPhaseGuard), `false` for `0xffffffff`.
 - Guarded entry points revert when called in a disallowed phase; callbacks cannot re-enter during MUTATING.
 
 The [`test/exploit/`](test/exploit/) directory contains one test per exploit class from Security Considerations. Each test deploys a vulnerable contract without PhaseGuard and a guarded variant, then confirms the exploit succeeds on the former and reverts on the latter.
@@ -315,9 +351,9 @@ The [`test/exploit/`](test/exploit/) directory contains one test per exploit cla
 5. Apply `withView` to all external/public view functions.
 6. Use `transitionTo()` to move between stable lifecycle phases.
 
-In practice, all external/public state-changing entry points should use `withMutating`, and all external/public view functions should use `withView`. The default is whole-interface coverage, not function-by-function guesswork.
+All external/public state-changing entry points should use `withMutating`, and all external/public view functions should use `withView`. The default is whole-interface coverage, not per-function opt-in.
 
-Because guarded views are blocked during `MUTATING`, contracts may need a split-view pattern: keep the guarded external/public view as the public interface, and move the shared read logic into an internal helper that mutating code can call directly.
+Because guarded views are blocked during `MUTATING`, contracts may need a split-view pattern: a guarded external/public view as the public interface, and an internal helper that mutating code can call directly.
 
 Minimal example:
 
@@ -350,6 +386,7 @@ Full integration guidance is in [`docs/integration.md`](docs/integration.md).
 
 - [`docs/security-model.md`](docs/security-model.md)
 - [`docs/integration.md`](docs/integration.md)
+- [`docs/gas-benchmarks.md`](docs/gas-benchmarks.md)
 
 ## Copyright
 

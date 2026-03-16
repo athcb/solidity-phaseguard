@@ -15,3 +15,6 @@ project-docs
 
 # Foundry coverage
 lcov.info
+
+# Default gas snapshot (use .gas-benchmark for benchmarks)
+.gas-snapshot

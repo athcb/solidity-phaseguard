@@ -4,6 +4,7 @@ permissions: {}
 
 on:
   push:
+    branches: [main, phaseguard-testsuite]
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +13,7 @@ env:
 
 jobs:
   check:
-    name: Foundry project
+    name: Build, Format & Test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,11 +29,17 @@ jobs:
       - name: Show Forge version
         run: forge --version
 
-      - name: Run Forge fmt
+      - name: Check formatting
         run: forge fmt --check
 
-      - name: Run Forge build
+      - name: Build (with contract sizes)
         run: forge build --sizes
 
-      - name: Run Forge tests
+      - name: Run tests
         run: forge test -vvv
+
+      - name: Run gas snapshot
+        run: forge snapshot --mc GasBenchmark --snap .gas-benchmark --check || true
+
+      - name: Run coverage
+        run: forge coverage --no-match-coverage "^(test|script|lib)/"
